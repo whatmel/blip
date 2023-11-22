@@ -9,16 +9,16 @@ from model.modeling_instructblip import FreezeInstructBlipForConditionalGenerati
 
 # TODO
 # 1. torch.distriubted run
-# 2. instructBlipforConditionalGeneration override 해서 f1 /iou score 내도록 하자 또는 trainer 코드 override 하든가.
-# 3. BERT - CLS token 알아보기
-# 4. ** optimize Dataset - preprocess.. inefficient to process on the fly
+# 2. compute_metric : F1/IoU
+# 3. BERT
+# 4. Optimizing dataset preprocess - on the fly
 
 def train():
     ####
     project_name = 'first'
-    model_name = 'Salesforce/instructblip-vicuna-7b' # too big
-    # model_name = 'Salesforce/instructblip-flan-t5-xl'
-    dataset_path = '/nfs_share2/code/donghee/inversecooking/data'
+    # model_name = 'Salesforce/instructblip-vicuna-7b' # too big
+    model_name = 'Salesforce/instructblip-flan-t5-xl'
+    dataset_path = '/nfs_share2/code/donghee/inversecooking/data' # path containing dataset
     epochs = 20
     batch_size = 5
     training_samples = 1000 # set to -1 for training on entire dataset
@@ -37,9 +37,7 @@ def train():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
 
-    # encoder_decoder = True if 'flan' in model_name else False
     decoder_only = True if model.config.use_decoder_only_language_model else False
-
 
     datasets = load_datasets(
         batch_size, 
