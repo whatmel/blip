@@ -31,10 +31,10 @@ def parse_args():
     # /path/to/Recipe1M/dataset
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/code/donghee/inversecooking/data', help='path containing Recipe1M dataset')
 
-    parser.add_argument('--epochs', type=int, default=5)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=20)
     parser.add_argument('--training_samples', type=int, default=1000, help='number of training sample. set to -1 for training on entire dataset')
-    parser.add_argument('--eval_samples', type=int, default=100, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
+    parser.add_argument('--eval_samples', type=int, default=1500, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
     parser.add_argument('--pre_map', type=bool, default=True, help='process data before forward')
 
     parser.add_argument(
@@ -58,7 +58,6 @@ def parse_args():
     return args
 
 def train(args):
-
     model = FreezeInstructBlipForConditionalGeneration.from_pretrained(args.model_name)
     processor = InstructBlipProcessor.from_pretrained(args.model_name)
 
@@ -89,8 +88,6 @@ def train(args):
         ddp_find_unused_parameters=False,
     )
 
-    # not saving LLM, VIT paramters
-    model.set_ignore_keys()
     # data_collator = CustomDataCollator(processor, args.decoder_only) # tokenize on the fly
 
     # TODO: compute_metrics

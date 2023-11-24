@@ -2,3 +2,6 @@
 .vscode
 outputs/*
 train_temp.py
+*.txt
+*ipynb
+upload.sh

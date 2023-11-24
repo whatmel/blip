@@ -189,19 +189,22 @@ class AttrDict(dict):
 
 
 def setup_logger(args):
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-    
-    logging.basicConfig(
-        level=logging.INFO if dist_utils.is_main_process() else logging.WARN,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(os.path.join(args.output_dir, 'logs.log'))],
-    )
+    if dist_utils.is_main_process():
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+        
+        logging.basicConfig(
+            level=logging.INFO if dist_utils.is_main_process() else logging.WARN,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            handlers=[logging.FileHandler(os.path.join(args.output_dir, 'logs.log'))],
+        )
 
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO if dist_utils.is_main_process() else logging.WARN)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO if dist_utils.is_main_process() else logging.WARN)
 
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    console_handler.setFormatter(formatter)
+        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        console_handler.setFormatter(formatter)
 
-    logging.getLogger().addHandler(console_handler)
+        logging.getLogger().addHandler(console_handler)
+    else:
+        logging.basicConfig(level=logging.WARN)
