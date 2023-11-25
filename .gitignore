@@ -5,3 +5,5 @@ train_temp.py
 *.txt
 *ipynb
 upload.sh
+logs/*
+

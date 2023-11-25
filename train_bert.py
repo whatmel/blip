@@ -5,19 +5,18 @@ import argparse
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import InstructBlipProcessor, TrainingArguments, Trainer
+from transformers import InstructBlipProcessor, TrainingArguments, Trainer, InstructBlipConfig
+from sklearn.metrics import f1_score, accuracy_score, jaccard_score
 
 from data.dataset import load_datasets, CustomDataCollator, collator, Recipe1M_Collator, load_datasets_for_distributed
 from data.utils import Vocabulary
-from model.modeling_instructblip import FreezeInstructBlipForConditionalGeneration
-from common.dist_utils import init_distributed_mode
+from model.modeling_instructblip import FreezeInstructBlipForConditionalGeneration, BERTInstructBlipForConditionalGeneration
+from model.processing_instructblip import BERTInstructBlipProcessor
 from common.logger import setup_logger
 
 # TODO
-# 2. compute_metric : F1/IoU
-# 3. BERT
-# 4. Optimizing dataset preprocess - on the fly
-# 5. log only main process
+# 2. compute_metric : F1/IoU /
+# 5. log only main process /
 
 def pretty_print(args):
     args_dict = vars(args)
@@ -27,11 +26,11 @@ def pretty_print(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Training script for distributed InstructBlip.")
 
-    parser.add_argument('--project_name', type=str, default='entire_train')
+    parser.add_argument('--project_name', type=str, default='BERT')
     # /path/to/Recipe1M/dataset
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/code/donghee/inversecooking/data', help='path containing Recipe1M dataset')
 
-    parser.add_argument('--epochs', type=int, default=5)
+    parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=20)
     parser.add_argument('--training_samples', type=int, default=-1, help='number of training sample. set to -1 for training on entire dataset')
     parser.add_argument('--eval_samples', type=int, default=1500, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
@@ -45,6 +44,14 @@ def parse_args():
         help="Specifies the model to use. Choose from 'Salesforce/instructblip-flan-t5-xl' (default), "
             "'Salesforce/instructblip-flan-t5-xxl', or 'Salesforce/instructblip-vicuna-7b'."
     )
+    parser.add_argument(
+        '--bert_name', 
+        type=str, 
+        default='bert-large-uncased',
+        choices=['bert-large-uncased', 'bert-base-uncased'],
+        help="Specifies the BERT model to use. Choose from 'bert-large-uncased' (default), "
+            "or 'bert-base-uncased'."
+    )
 
     args = parser.parse_args()
     
@@ -57,9 +64,32 @@ def parse_args():
 
     return args
 
+def compute_metrics(pred):
+    labels = pred.label_ids
+    preds = torch.sigmoid(torch.tensor(pred.predictions[0])).numpy() >= 0.5
+
+    f1_micro = f1_score(labels, preds, average='micro')
+    f1_macro = f1_score(labels, preds, average='macro')
+    acc = accuracy_score(labels, preds)
+    iou_macro = jaccard_score(labels, preds, average='macro') # TODO macro iou?
+    iou_micro = jaccard_score(labels, preds, average='micro')
+
+    result = {
+        'f1_micro': f1_micro,
+        'f1_macro': f1_macro,
+        'accuracy': acc,
+        'iou_macro': iou_macro,
+        'iou_micro': iou_micro,
+    }
+
+    logging.info(f'* Evaluation result: {result}')
+
+    return result
+
 def train(args):
-    model = FreezeInstructBlipForConditionalGeneration.from_pretrained(args.model_name)
-    processor = InstructBlipProcessor.from_pretrained(args.model_name)
+    model = BERTInstructBlipForConditionalGeneration.from_pretrained(args.model_name) # TODO better way
+    model.to_bert(args.bert_name)
+    processor = BERTInstructBlipProcessor.from_pretrained(args.model_name) # TODO - better way
 
     datasets = load_datasets( 
         processor=processor, 
@@ -67,7 +97,8 @@ def train(args):
         training_samples=args.training_samples,
         eval_samples=args.eval_samples, 
         pre_map=args.pre_map,
-        decoder_only=args.decoder_only
+        decoder_only=args.decoder_only,
+        encoder_only = True
     )
     
     training_args = TrainingArguments(
@@ -87,17 +118,13 @@ def train(args):
         dataloader_num_workers=4,
         ddp_find_unused_parameters=False,
     )
-
-    # data_collator = CustomDataCollator(processor, args.decoder_only) # tokenize on the fly
-
-    # TODO: compute_metrics
+    
     trainer = Trainer( 
         model=model,
         args=training_args,
         train_dataset=datasets['train'],
         eval_dataset=datasets['val'],
-        # compute_metrics=compute_metrics,
-        # data_collator=data_collator
+        compute_metrics=compute_metrics,
     )
 
     # Train the model

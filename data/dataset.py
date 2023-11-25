@@ -19,6 +19,7 @@ from PIL import Image
 import torch
 import torchvision.transforms as transforms
 import torch.utils.data as data
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from datasets import Features, Value, Array3D, Sequence
@@ -236,9 +237,17 @@ def recipe1m_generator(processor, data_dir, split, max_num_labels, max_num_sampl
             'ingredient_int': item['ingredient_int'].tolist()  # Convert torch tensor to list
         }
 
+def to_one_hot(labels, num_classes=1488):
 
+    one_hot = torch.zeros(labels.size(0), num_classes)
 
-def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max_num_labels=20, pre_map=False, decoder_only=False) -> Dict[str, hf_Dataset]:
+    for i, label in enumerate(labels):
+        one_hot[i, label] = 1
+        one_hot[i, [0, num_classes-1]] = 0 # pad remove
+
+    return one_hot
+
+def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max_num_labels=20, pre_map=False, decoder_only=False, encoder_only=False) -> Dict[str, hf_Dataset]:
     '''
     :param data_dir: recipe1M dataset directory containing 
         1. lmdb dir (lmdb_train, lmdb_val, lmdb_train)
@@ -266,6 +275,11 @@ def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max
             truncation=True,
             padding=False,
         )
+
+        if encoder_only:
+            sample = prompt
+            sample['label'] = to_one_hot(torch.tensor(example['ingredient_int']))
+            return sample
 
         output = processor(
             text=example['text_output'], 
