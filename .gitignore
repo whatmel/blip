@@ -6,4 +6,7 @@ train_temp.py
 *ipynb
 upload.sh
 logs/*
-
+*.png
+temp.py
+train_t5_OI.py
+*.json

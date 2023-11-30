@@ -242,12 +242,15 @@ def to_one_hot(labels, num_classes=1488):
     one_hot = torch.zeros(labels.size(0), num_classes)
 
     for i, label in enumerate(labels):
+        if len(label)==0:
+            continue
+        
         one_hot[i, label] = 1
         one_hot[i, [0, num_classes-1]] = 0 # pad remove
 
     return one_hot
 
-def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max_num_labels=20, pre_map=False, decoder_only=False, encoder_only=False) -> Dict[str, hf_Dataset]:
+def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max_num_labels=20, pre_map=False, decoder_only=False, encoder_only=False, load_from_cache_file=True) -> Dict[str, hf_Dataset]:
     '''
     :param data_dir: recipe1M dataset directory containing 
         1. lmdb dir (lmdb_train, lmdb_val, lmdb_train)
@@ -293,6 +296,8 @@ def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max
         sample['qformer_input_ids'] = prompt.qformer_input_ids
         sample['qformer_attention_mask'] = prompt.qformer_attention_mask
         sample['label_ids'] = output.input_ids
+
+        sample['ingredient_ids'] = to_one_hot(torch.tensor(example['ingredient_int']))
 
         if decoder_only:
             prompt_plus_output = processor(
@@ -344,7 +349,7 @@ def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max
             features = features,
         )
         if pre_map:
-            datasets[split] = gen_dataset.map(process_data, batched=True)
+            datasets[split] = gen_dataset.map(process_data, batched=True, load_from_cache_file=load_from_cache_file)
         else:
             datasets[split] = gen_dataset
 

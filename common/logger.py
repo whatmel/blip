@@ -190,8 +190,12 @@ class AttrDict(dict):
 
 def setup_logger(args):
     if dist_utils.is_main_process():
+        # TODO sometimes error..
         if not os.path.exists(args.output_dir):
-            os.makedirs(args.output_dir)
+            try:
+                os.makedirs(args.output_dir)
+            except:
+                pass
         
         logging.basicConfig(
             level=logging.INFO if dist_utils.is_main_process() else logging.WARN,

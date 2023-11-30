@@ -9,6 +9,7 @@ class BERTInstructBlipProcessor(InstructBlipProcessor):
     def __init__(self, image_processor, tokenizer, qformer_tokenizer):
         super().__init__(image_processor, tokenizer, qformer_tokenizer)
 
+    
+    def to_bert(self, bert_name):
         # BERT tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained("bert-large-uncased") # TODO
-        self.qformer_tokenizer = qformer_tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(bert_name) # TODO
