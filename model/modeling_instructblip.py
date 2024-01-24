@@ -1,18 +1,23 @@
 import os
 from typing import Callable, Optional, Tuple, Union
 import warnings
+import logging
 
 import torch
 from transformers import (
     InstructBlipForConditionalGeneration, 
     InstructBlipConfig, 
     BertForSequenceClassification,
-    T5ForConditionalGeneration
+    CLIPModel,
+    T5ForConditionalGeneration,
+    T5ForSequenceClassification,
+    T5Model
 )
+from transformers.modeling_outputs import Seq2SeqSequenceClassifierOutput
 from transformers import InstructBlipVisionModel, InstructBlipQFormerModel
 from transformers.models.instructblip.modeling_instructblip import InstructBlipForConditionalGenerationModelOutput
 import torch.nn as nn
-from torch.nn import CrossEntropyLoss
+from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 
 from .modeling_t5 import OrderInvariantT5ForConditionalGeneration
 
@@ -326,6 +331,7 @@ class FreezeInstructBlipForConditionalGeneration(InstructBlipForConditionalGener
         ignore_keys = [key for key in all_keys if key.startswith(ignore_prefix)]
         self._keys_to_ignore_on_save = set(ignore_keys)
 
+
     def save_pretrained(
         self,
         save_directory: Union[str, os.PathLike],
@@ -391,12 +397,68 @@ class FreezeInstructBlipForConditionalGeneration(InstructBlipForConditionalGener
         )
 
 
-class OrderInvariantInstructBlipForConditionalGeneration(InstructBlipForConditionalGeneration):
+class QT5InstructBlipForConditionalGeneration(InstructBlipForConditionalGeneration):
     def __init__(self, config):
+        # config = InstructBlipConfig(model_name)
         super().__init__(config)
+        # TODO - from_pretrained에서 어떻게 불러오고 이걸 또 어떻게 init 하는지...
+        self.num_labels = 1488
+        # self.classification_head = nn.Linear(self.language_model.config.hidden_size, self.num_labels)
+        # self.loss_fct = BCEWithLogitsLoss()
+
+        # self.post_init() # TODO
+
+        # num_decoder_query_token = 1 # TODO
+        # self.decoder_query_tokens = nn.Parameter(
+        #     torch.zeros(1, num_decoder_query_token, self.language_model.config.hidden_size)
+        # )
+        # self.decoder_query_tokens.data.normal_(mean=0.0, std=0.02) # TODO std
+
+        # self.backbone_freeze()
     
-    def to_order_invariant_t5(self, model_name):
-        self.language_model = OrderInvariantT5ForConditionalGeneration.from_pretrained(model_name)
+    def reinit(self, num_query=8, num_labels=1488):
+        self.num_labels = num_labels
+        self.num_query = num_query
+        assert self.language_model.config.hidden_size % num_query == 0
+        self.reduction_size = self.language_model.config.hidden_size // self.num_query
+        
+        self.reduction_layer = nn.Linear(self.language_model.config.hidden_size, self.reduction_size)
+        self.classification_head = nn.Linear(self.language_model.config.hidden_size, self.num_labels)
+        self.loss_fct = BCEWithLogitsLoss()
+        self.decoder_query_tokens = nn.Parameter(
+            torch.zeros(1, self.num_query, self.language_model.config.hidden_size)
+        )
+        self.decoder_query_tokens.data.normal_(mean=0.0, std=0.02) # TODO std
+        
+        self.backbone_freeze()
+    
+    def backbone_freeze(self):
+        for param in self.vision_model.parameters():
+            param.requires_grad = False
+
+        for param in self.language_model.parameters():
+            param.requires_grad = False
+        
+        self.set_ignore_keys()
+
+        num_train_param = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        logging.info(f'* Number of training paramters: {num_train_param}')
+    
+    def set_ignore_keys(self, ignore_prefix=('vision_model', 'language_model')):
+        """
+        Set the _keys_to_ignore_on_save attribute of the model to ignore all keys except those starting with the Q-former prefix.
+
+        Arguments:
+            model (PreTrainedModel): The model whose keys are to be filtered.
+            qformer_prefix (str): The prefix used for the Q-former's parameters.
+        """
+        # all_keys = self.state_dict().keys()
+        # ignore_keys = [key for key in all_keys if key.startswith(ignore_prefix)]
+        # self._keys_to_ignore_on_save = set(ignore_keys)
+
+        trainable_keys = [name for name, param in self.named_parameters() if param.requires_grad]
+        no_trained = self.state_dict().keys() - set(trainable_keys) # not trainable params
+        self._keys_to_ignore_on_save = no_trained
     
     def forward(
         self,
@@ -411,7 +473,6 @@ class OrderInvariantInstructBlipForConditionalGeneration(InstructBlipForConditio
         output_hidden_states: Optional[bool] = None,
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
-        positions=None,
     ) -> Union[Tuple, InstructBlipForConditionalGenerationModelOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -502,92 +563,230 @@ class OrderInvariantInstructBlipForConditionalGeneration(InstructBlipForConditio
             attention_mask = torch.ones_like(input_ids)
         attention_mask = torch.cat([language_model_attention_mask.to(attention_mask.device), attention_mask], dim=1)
 
-        if self.config.use_decoder_only_language_model:
-            outputs = self.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-            logits = outputs.logits if return_dict else outputs[0]
-            loss = None
-            # we compute the loss here since we need to take into account the sequence length of the query embeds
-            if labels is not None:
-                labels = labels.to(logits.device)
-                logits = logits[:, -labels.size(1) :, :]
-                # Shift so that tokens < n predict n
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous().to(logits.device)
+        ## HERE ##
+        bs = input_ids.shape[0]
+        decoder_query_tokens = self.decoder_query_tokens.expand(bs, -1, -1) # (batch_size, num_query, 2048)
+        decoder_query_atts = torch.ones(decoder_query_tokens.size()[:-1], dtype=torch.long).to(input_ids.device) # (batch_size, num_query)
+        ##
 
-                # Flatten the tokens
-                loss_fct = CrossEntropyLoss(reduction="mean")
-
-                loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
-        else:
-            outputs = self.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                labels=labels,
-                positions=positions ##
-            )
-            loss = outputs.loss if return_dict else outputs[0]
-            logits = outputs.logits if return_dict else outputs[1]
-
-        if not return_dict:
-            output = (logits, vision_outputs, query_outputs, outputs)
-            return ((loss,) + output) if loss is not None else output
-
-        return InstructBlipForConditionalGenerationModelOutput(
-            loss=loss,
-            logits=logits,
-            vision_outputs=vision_outputs,
-            qformer_outputs=query_outputs,
-            language_model_outputs=outputs,
+        outputs = self.language_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            decoder_input_ids=None,
+            decoder_inputs_embeds=decoder_query_tokens,
+            decoder_attention_mask=decoder_query_atts,
+            output_attentions=output_attentions,
+            output_hidden_states=True,
+            return_dict=True,
+            labels=None,
         )
 
-    @torch.no_grad()
-    def generate(
+        last_hidden_state = outputs.decoder_hidden_states[-1] # (batch_size, num_query, 2048)
+
+        reduced_query = self.reduction_layer(last_hidden_state) # (batch_size, num_query, 2048%num_query) # 256
+        reduced_query = reduced_query.view(bs, -1) # (batch_size, 2048)
+
+        logits = self.classification_head(reduced_query) # (batch_size, num_label)
+        if self.num_query == 1:
+            logits.squeeze_(1) ## in place
+        loss = self.loss_fct(logits, labels)
+
+        return Seq2SeqSequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+        )
+
+    
+    def save_pretrained(
+        self,
+        save_directory: Union[str, os.PathLike],
+        is_main_process: bool = True,
+        state_dict: Optional[dict] = None,
+        save_function: Callable = torch.save,
+        push_to_hub: bool = False,
+        max_shard_size: Union[int, str] = "5GB",
+        safe_serialization: bool = True,
+        variant: Optional[str] = None,
+        token: Optional[Union[str, bool]] = None,
+        save_peft_format: bool = True,
+        **kwargs,
+    ):
+        """
+        Save the model using the traditional PyTorch way (pickle) by safe_serialization to False
+        """
+        super().save_pretrained(
+            save_directory=save_directory, 
+            is_main_process=is_main_process,
+            state_dict=state_dict,
+            save_function=save_function,
+            push_to_hub=push_to_hub,
+            max_shard_size=max_shard_size,
+            safe_serialization=False,
+            variant=variant,
+            token=token,
+            save_peft_format=save_peft_format,
+            **kwargs
+        )
+
+    def save_pretrained_final(
+        self,
+        save_directory: Union[str, os.PathLike],
+        is_main_process: bool = True,
+        state_dict: Optional[dict] = None,
+        save_function: Callable = torch.save,
+        push_to_hub: bool = False,
+        max_shard_size: Union[int, str] = "5GB",
+        safe_serialization: bool = True,
+        variant: Optional[str] = None,
+        token: Optional[Union[str, bool]] = None,
+        save_peft_format: bool = True,
+        **kwargs,
+    ):
+        """
+        Save entire model (including ViT, LLM)
+        """
+        self._keys_to_ignore_on_save = None
+        
+        super().save_pretrained(
+            save_directory=save_directory, 
+            is_main_process=is_main_process,
+            state_dict=state_dict,
+            save_function=save_function,
+            push_to_hub=push_to_hub,
+            max_shard_size=max_shard_size,
+            safe_serialization=False,
+            variant=variant,
+            token=token,
+            save_peft_format=save_peft_format,
+            **kwargs
+        )
+
+class CLIP_QT5InstructBlipForConditionalGeneration(InstructBlipForConditionalGeneration):
+    def __init__(self, config):
+        # config = InstructBlipConfig(model_name)
+        super().__init__(config)
+        # TODO - from_pretrained에서 어떻게 불러오고 이걸 또 어떻게 init 하는지...
+        self.num_labels = 1488
+        
+    def reinit(self, clip_model='openai/clip-vit-large-patch14-336', num_query=8, num_labels=1488):
+        self.num_labels = num_labels
+        self.num_query = num_query
+        assert self.language_model.config.hidden_size % num_query == 0
+        self.reduction_size = self.language_model.config.hidden_size // self.num_query
+        
+        self.reduction_layer = nn.Linear(self.language_model.config.hidden_size, self.reduction_size)
+        self.classification_head = nn.Linear(self.language_model.config.hidden_size, self.num_labels)
+        self.loss_fct = BCEWithLogitsLoss()
+        self.decoder_query_tokens = nn.Parameter(
+            torch.zeros(1, self.num_query, self.language_model.config.hidden_size)
+        )
+        self.decoder_query_tokens.data.normal_(mean=0.0, std=0.02) # TODO std
+
+        ##
+        self.vision_model = CLIPModel.from_pretrained(clip_model)
+        
+        self.backbone_freeze()
+    
+    def backbone_freeze(self):
+        for param in self.vision_model.parameters():
+            param.requires_grad = False
+
+        for param in self.language_model.parameters():
+            param.requires_grad = False
+        
+        self.set_ignore_keys()
+
+        num_train_param = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        logging.info(f'* Number of training paramters: {num_train_param}')
+    
+    def set_ignore_keys(self, ignore_prefix=('vision_model', 'language_model')):
+        """
+        Set the _keys_to_ignore_on_save attribute of the model to ignore all keys except those starting with the Q-former prefix.
+
+        Arguments:
+            model (PreTrainedModel): The model whose keys are to be filtered.
+            qformer_prefix (str): The prefix used for the Q-former's parameters.
+        """
+        # all_keys = self.state_dict().keys()
+        # ignore_keys = [key for key in all_keys if key.startswith(ignore_prefix)]
+        # self._keys_to_ignore_on_save = set(ignore_keys)
+
+        trainable_keys = [name for name, param in self.named_parameters() if param.requires_grad]
+        no_trained = self.state_dict().keys() - set(trainable_keys) # not trainable params
+        self._keys_to_ignore_on_save = no_trained
+    
+    def forward(
         self,
         pixel_values: torch.FloatTensor,
-        qformer_input_ids: Optional[torch.LongTensor] = None,
+        qformer_input_ids: torch.FloatTensor,
         qformer_attention_mask: Optional[torch.LongTensor] = None,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
-        **generate_kwargs,
-    ) -> torch.LongTensor:
-        """
-        Overrides `generate` function to be able to use the model as a conditional generator.
-
-        Args:
-            pixel_values (`torch.FloatTensor` of shape (batch_size, num_channels, height, width)):
-                Input images to be processed.
-            qformer_input_ids (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                The sequence used as a prompt to be fed to the Q-Former module.
-            qformer_attention_mask (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                Mask to avoid performing attention on padding token indices.
-            input_ids (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                The sequence used as a prompt for the generation.
-            attention_mask (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                Mask to avoid performing attention on padding token indices.
+        decoder_input_ids: Optional[torch.LongTensor] = None,
+        decoder_attention_mask: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        labels: Optional[torch.LongTensor] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, InstructBlipForConditionalGenerationModelOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the language modeling loss. Indices should be in `[-100, 0, ..., config.vocab_size -
+            1]`. All labels set to `-100` are ignored (masked), the loss is only computed for labels in `[0, ...,
+            config.vocab_size]`
 
         Returns:
-            captions (list): A list of strings of length batch_size * num_captions.
-        """
-        if hasattr(self, "hf_device_map"):
-            # preprocess for `accelerate`
-            self._preprocess_accelerate()
 
-        batch_size = pixel_values.shape[0]
-        image_embeds = self.vision_model(pixel_values, return_dict=True).last_hidden_state
+        Examples:
 
+        ```python
+        >>> from transformers import InstructBlipProcessor, InstructBlipForConditionalGeneration
+        >>> import torch
+        >>> from PIL import Image
+        >>> import requests
+
+        >>> model = InstructBlipForConditionalGeneration.from_pretrained("Salesforce/instructblip-vicuna-7b")
+        >>> processor = InstructBlipProcessor.from_pretrained("Salesforce/instructblip-vicuna-7b")
+
+        >>> device = "cuda" if torch.cuda.is_available() else "cpu"
+        >>> model.to(device)  # doctest: +IGNORE_RESULT
+
+        >>> url = "https://raw.githubusercontent.com/salesforce/LAVIS/main/docs/_static/Confusing-Pictures.jpg"
+        >>> image = Image.open(requests.get(url, stream=True).raw).convert("RGB")
+        >>> prompt = "What is unusual about this image?"
+        >>> inputs = processor(images=image, text=prompt, return_tensors="pt").to(device)
+
+        >>> outputs = model.generate(
+        ...     **inputs,
+        ...     do_sample=False,
+        ...     num_beams=5,
+        ...     max_length=256,
+        ...     min_length=1,
+        ...     top_p=0.9,
+        ...     repetition_penalty=1.5,
+        ...     length_penalty=1.0,
+        ...     temperature=1,
+        ... )
+        >>> generated_text = processor.batch_decode(outputs, skip_special_tokens=True)[0].strip()
+        >>> print(generated_text)
+        The unusual aspect of this image is that a man is ironing clothes on the back of a yellow SUV, which is parked in the middle of a busy city street. This is an unconventional approach to ironing clothes, as it requires the man to balance himself and his ironing equipment on top of the vehicle while navigating through traffic. Additionally, the presence of taxis and other vehicles in the scene further emphasizes the unusual nature of this situation.
+        ```"""
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # step 1: forward the images through the vision encoder,
+        # to get image embeddings of shape (batch_size, seq_len, hidden_size)
+        vision_outputs = self.vision_model(
+            pixel_values=pixel_values,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        image_embeds = vision_outputs[0]
+
+        # step 2: forward the query tokens through the QFormer, using the image embeddings for cross-attention
         image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
 
+        # difference with BLIP-2 here: we also feed the instruction prompt to the Q-Former
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         query_attention_mask = torch.ones(query_tokens.size()[:-1], dtype=torch.long, device=image_embeds.device)
         if qformer_attention_mask is None:
@@ -599,43 +798,120 @@ class OrderInvariantInstructBlipForConditionalGeneration(InstructBlipForConditio
             query_embeds=query_tokens,
             encoder_hidden_states=image_embeds,
             encoder_attention_mask=image_attention_mask,
-            return_dict=True,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
-        query_output = query_outputs.last_hidden_state[:, : query_tokens.size(1), :]
+        query_output = query_outputs[0][:, : query_tokens.size(1), :]
 
+        # step 3: use the language model, conditioned on the query outputs and the prompt
         language_model_inputs = self.language_projection(query_output)
-        language_attention_mask = torch.ones(
+        language_model_attention_mask = torch.ones(
             language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
         )
 
-        if input_ids is None:
-            input_ids = (
-                torch.LongTensor([[self.config.text_config.bos_token_id]])
-                .repeat(batch_size, 1)
-                .to(image_embeds.device)
-            )
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-        attention_mask = torch.cat([language_attention_mask, attention_mask.to(language_attention_mask.device)], dim=1)
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
-        # concatenate query embeddings with prompt embeddings
-        inputs_embeds = self.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
 
-        outputs = self.language_model.generate(
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        attention_mask = torch.cat([language_model_attention_mask.to(attention_mask.device), attention_mask], dim=1)
+
+        ## HERE ##
+        bs = input_ids.shape[0]
+        decoder_query_tokens = self.decoder_query_tokens.expand(bs, -1, -1) # (batch_size, num_query, 2048)
+        decoder_query_atts = torch.ones(decoder_query_tokens.size()[:-1], dtype=torch.long).to(input_ids.device) # (batch_size, num_query)
+        ##
+
+        outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            **generate_kwargs,
+            decoder_input_ids=None,
+            decoder_inputs_embeds=decoder_query_tokens,
+            decoder_attention_mask=decoder_query_atts,
+            output_attentions=output_attentions,
+            output_hidden_states=True,
+            return_dict=True,
+            labels=None,
         )
 
-        # the InstructBLIP authors used inconsistent tokenizer/model files during training,
-        # with the tokenizer's bos token being set to </s> which has ID=2,
-        # whereas the model's text config has bos token id = 0
-        if self.config.text_config.architectures[0] == "LLaMAForCausalLM":
-            if isinstance(outputs, torch.Tensor):
-                outputs[outputs == 0] = 2
-            else:
-                outputs.sequences[outputs.sequences == 0] = 2
+        last_hidden_state = outputs.decoder_hidden_states[-1] # (batch_size, num_query, 2048)
 
-        return outputs
+        reduced_query = self.reduction_layer(last_hidden_state) # (batch_size, num_query, 2048%num_query) # 256
+        reduced_query = reduced_query.view(bs, -1) # (batch_size, 2048)
+
+        logits = self.classification_head(reduced_query) # (batch_size, num_label)
+        if self.num_query == 1:
+            logits.squeeze_(1) ## in place
+        loss = self.loss_fct(logits, labels)
+
+        return Seq2SeqSequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+        )
+
     
+    def save_pretrained(
+        self,
+        save_directory: Union[str, os.PathLike],
+        is_main_process: bool = True,
+        state_dict: Optional[dict] = None,
+        save_function: Callable = torch.save,
+        push_to_hub: bool = False,
+        max_shard_size: Union[int, str] = "5GB",
+        safe_serialization: bool = True,
+        variant: Optional[str] = None,
+        token: Optional[Union[str, bool]] = None,
+        save_peft_format: bool = True,
+        **kwargs,
+    ):
+        """
+        Save the model using the traditional PyTorch way (pickle) by safe_serialization to False
+        """
+        super().save_pretrained(
+            save_directory=save_directory, 
+            is_main_process=is_main_process,
+            state_dict=state_dict,
+            save_function=save_function,
+            push_to_hub=push_to_hub,
+            max_shard_size=max_shard_size,
+            safe_serialization=False,
+            variant=variant,
+            token=token,
+            save_peft_format=save_peft_format,
+            **kwargs
+        )
+
+    def save_pretrained_final(
+        self,
+        save_directory: Union[str, os.PathLike],
+        is_main_process: bool = True,
+        state_dict: Optional[dict] = None,
+        save_function: Callable = torch.save,
+        push_to_hub: bool = False,
+        max_shard_size: Union[int, str] = "5GB",
+        safe_serialization: bool = True,
+        variant: Optional[str] = None,
+        token: Optional[Union[str, bool]] = None,
+        save_peft_format: bool = True,
+        **kwargs,
+    ):
+        """
+        Save entire model (including ViT, LLM)
+        """
+        self._keys_to_ignore_on_save = None
+        
+        super().save_pretrained(
+            save_directory=save_directory, 
+            is_main_process=is_main_process,
+            state_dict=state_dict,
+            save_function=save_function,
+            push_to_hub=push_to_hub,
+            max_shard_size=max_shard_size,
+            safe_serialization=False,
+            variant=variant,
+            token=token,
+            save_peft_format=save_peft_format,
+            **kwargs
+        )

@@ -10,3 +10,5 @@ logs/*
 temp.py
 train_t5_OI.py
 *.json
+andrew.py
+*.png

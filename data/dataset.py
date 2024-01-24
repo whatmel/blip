@@ -26,7 +26,7 @@ from datasets import Features, Value, Array3D, Sequence
 from datasets import Dataset as hf_Dataset
 from transformers import DataCollatorWithPadding
 
-from data.utils import Vocabulary
+from data.utils import Vocabulary, to_one_hot
 
 class Recipe1MDataset(Dataset):
     """
@@ -237,20 +237,76 @@ def recipe1m_generator(processor, data_dir, split, max_num_labels, max_num_sampl
             'ingredient_int': item['ingredient_int'].tolist()  # Convert torch tensor to list
         }
 
-def to_one_hot(labels, num_classes=1488):
+def load_image_datasets(
+    image_processor,
+    data_dir, 
+    training_samples,
+    eval_samples, 
+    pre_map,
+    load_from_cache_file=True,
+    max_num_labels=20,
+):
+    if not pre_map:
+        logging.info('batches of data are processed on-the-fly')
 
-    one_hot = torch.zeros(labels.size(0), num_classes)
-
-    for i, label in enumerate(labels):
-        if len(label)==0:
-            continue
+    if training_samples != -1:
+        logging.info(f"Limiting the number of training samples to {training_samples}")
+    
+    def process_data(example):
+        sample = dict()
         
-        one_hot[i, label] = 1
-        one_hot[i, [0, num_classes-1]] = 0 # pad remove
+        sample['pixel_values'] = image_processor(np.array(example['image'])).pixel_values
+        sample['labels'] = to_one_hot(torch.tensor(example['ingredient_int']), remove_pad = True)
 
-    return one_hot
+        return sample
 
-def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max_num_labels=20, pre_map=False, decoder_only=False, encoder_only=False, load_from_cache_file=True) -> Dict[str, hf_Dataset]:
+    datasets = dict()
+    features = Features({
+        'image': Array3D(dtype="float32", shape=(3, 256, 256)),  # Assuming image converted to 3D array
+        'text_input': Value(dtype='string'),
+        'text_output': Value(dtype='string'),
+        'text_input_output': Value(dtype='string'),
+        'ingredient_int': Sequence(feature=Value(dtype='int64'))
+    })
+
+    for split in ['train', 'val', 'test']:
+        max_num_samples = eval_samples if split in ['val', 'test'] else training_samples
+
+        # Define a lambda function that includes the arguments
+        generator_function = lambda split=split, max_num_samples=max_num_samples: recipe1m_generator(
+            processor=None,
+            data_dir=data_dir,
+            split=split,
+            max_num_labels=max_num_labels,
+            max_num_samples=max_num_samples,
+        )
+
+        gen_dataset = hf_Dataset.from_generator(
+            generator = generator_function,
+            features = features,
+        )
+        if pre_map:
+            datasets[split] = gen_dataset.map(process_data, batched=True, load_from_cache_file=load_from_cache_file)
+        else:
+            datasets[split] = gen_dataset
+
+    del gen_dataset
+
+    return datasets
+    
+
+def load_datasets(
+        processor,
+        data_dir, 
+        training_samples=-1, 
+        eval_samples=1500,
+        test_samples=1500, 
+        max_num_labels=20, 
+        pre_map=False, 
+        decoder_only=False, 
+        encoder_only=False, 
+        load_from_cache_file=True,
+    ) -> Dict[str, hf_Dataset]:
     '''
     :param data_dir: recipe1M dataset directory containing 
         1. lmdb dir (lmdb_train, lmdb_val, lmdb_train)
@@ -295,9 +351,10 @@ def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max
         sample['pixel_values'] = prompt.pixel_values
         sample['qformer_input_ids'] = prompt.qformer_input_ids
         sample['qformer_attention_mask'] = prompt.qformer_attention_mask
-        sample['label_ids'] = output.input_ids
+        # sample['label_ids'] = output.input_ids
+        sample['labels'] = to_one_hot(torch.tensor(example['ingredient_int'])) ## TODO label ids? label?
 
-        sample['ingredient_ids'] = to_one_hot(torch.tensor(example['ingredient_int']))
+        # sample['ingredient_ids'] = to_one_hot(torch.tensor(example['ingredient_int']))
 
         if decoder_only:
             prompt_plus_output = processor(
@@ -333,7 +390,13 @@ def load_datasets(processor, data_dir, training_samples=-1, eval_samples=-1, max
     })
 
     for split in ['train', 'val', 'test']:
-        max_num_samples = eval_samples if split in ['val', 'test'] else training_samples
+        # max_num_samples = eval_samples if split in ['val', 'test'] else training_samples
+        if split == 'train':
+            max_num_samples = training_samples
+        elif split == 'val':
+            max_num_samples = eval_samples
+        else:
+            max_num_samples = test_samples
 
         # Define a lambda function that includes the arguments
         generator_function = lambda split=split, max_num_samples=max_num_samples: recipe1m_generator(

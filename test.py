@@ -2,19 +2,25 @@ import os
 from PIL import Image
 import json
 import argparse
+import pickle
+import numpy as np
 
 from matplotlib import pyplot as plt
 import textwrap
+from sklearn.metrics import f1_score, accuracy_score, jaccard_score
 
 from model.modeling_instructblip import FreezeInstructBlipForConditionalGeneration, BERTInstructBlipForConditionalGeneration
 from transformers import InstructBlipProcessor,  InstructBlipConfig
 from transformers import AutoModel, AutoTokenizer
+from transformers.trainer_utils import EvalPrediction
 import torch
+
+from data.utils import Vocabulary, to_one_hot
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Testing script for distributed InstructBlip.")
 
-    parser.add_argument('--project_name', type=str, default='T5')
+    parser.add_argument('--project_name', type=str, default='BERT')
     parser.add_argument('--check_point', type=str, default='best')
     parser.add_argument(
         '--model_name', 
@@ -79,12 +85,62 @@ def load_model_tokenizer(args):
 
     return model, llm_tokenizer, qformer_tokenizer, vision_processor
 
+def retrieve_recipe1m(test_dict):
+    dataset = pickle.load(open('/nfs_share2/code/donghee/inversecooking/data/recipe1m_test.pkl', 'rb'))
+    ingrs_vocab = pickle.load(open('/nfs_share2/code/donghee/inversecooking/data/recipe1m_vocab_ingrs.pkl', 'rb'))
+    max_num_labels = 20
+    test_ids = set([entry['id'] for entry in test_dict])
+
+    id2dataset = dict()
+    for entry in dataset:
+        if entry['id'] in test_ids:
+            id2dataset[entry['id']] = entry
+    # del dataset
+
+    all_gt = []
+    for entry in test_dict:
+        sample = id2dataset[entry['id']]
+        # ingredient integer
+        labels = sample['ingredients']
+        ilabels_gt = np.ones(max_num_labels) * ingrs_vocab('<pad>')
+        pos = 0
+
+        true_ingr_recipe_idxs = []
+        for i in range(len(labels)):
+            true_ingr_recipe_idxs.append(ingrs_vocab(labels[i]))
+
+        for i in range(max_num_labels):
+            if i >= len(labels):
+                label = '<pad>'
+            else:
+                label = labels[i]
+            label_recipe_idx = ingrs_vocab(label)
+            if label_recipe_idx not in ilabels_gt:
+                ilabels_gt[pos] = label_recipe_idx
+                pos += 1
+
+        ilabels_gt[pos] = ingrs_vocab('<end>')
+        all_gt.append(ilabels_gt)
+        # ingr_gt_int = torch.from_numpy(ilabels_gt).long()
+    
+    all_gt = torch.tensor(np.array(all_gt)).long()
+    # all_gt_one_hot = to_one_hot(all_gt)
+
+    return all_gt
+
+
 def demo_dataset(vision_processor, llm_tokenizer, qformer_tokenizer, device):
+    """
+    return sample, labels (tensor, not one-hot vector)
+    """
     
     with open('data/demo_test_images/demo_test.json', 'r') as f:
-        labels = json.load(f)
-    
-    ground_truths = [', '.join(ingr['text'] for ingr in entry['ingredients']) for entry in labels]
+        test_json = json.load(f)
+
+    labels = retrieve_recipe1m(test_json)
+
+    # ground_truths = [', '.join(ingr['text'] for ingr in entry['ingredients']) for entry in labels]
+
 
     images = []
     for filename in os.listdir('data/demo_test_images'):
@@ -107,7 +163,7 @@ def demo_dataset(vision_processor, llm_tokenizer, qformer_tokenizer, device):
         'qformer_attention_mask': qformer_prompt.attention_mask
     }
 
-    return sample, ground_truths
+    return sample, labels
 
 def pretty_print(outputs, images, labels, llm_tokenizer, save_path):
     """
@@ -117,7 +173,22 @@ def pretty_print(outputs, images, labels, llm_tokenizer, save_path):
         """Wrap text for better display in plots."""
         return '\n'.join(textwrap.wrap(text, width=width))
     
-    predictions = llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    predictions = torch.sigmoid(torch.tensor(outputs.logits))
+    mask = predictions > 0.5
+    pred_idx = torch.nonzero(mask, as_tuple=False)
+
+    with open('data/ingr_cluster.json', 'r') as f:
+        ingr_cluster = json.load(f)
+
+    all_pred_ingrs = [[] for _ in range(predictions.shape[0])]
+    for idx in pred_idx:
+        batch_idx, label_idx = idx.tolist()
+        all_pred_ingrs[batch_idx].append(ingr_cluster[str(label_idx)])
+
+    ingr_labels = [[] for _ in range(predictions.shape[0])]
+    for idx in labels:
+        batch_idx, label_idx = idx.tolist()
+        ingr_labels[batch_idx].append(ingr_cluster[str(label_idx)])
 
     num_images = len(images)
     fig, axs = plt.subplots(num_images, 1, figsize=(15, 20 * num_images))
@@ -125,7 +196,7 @@ def pretty_print(outputs, images, labels, llm_tokenizer, save_path):
     if num_images == 1:
         axs = [axs]
     
-    for i, (img, label, prediction) in enumerate(zip(images, labels, predictions)):
+    for i, (img, label, prediction) in enumerate(zip(images, ingr_labels, all_pred_ingrs)):
         axs[i].imshow(img)
         axs[i].axis('off')
         title_text = f"- Ground truth: {wrap_text(label, 80)}\n- Prediction: {wrap_text(prediction, 80)}"
@@ -138,12 +209,39 @@ def pretty_print(outputs, images, labels, llm_tokenizer, save_path):
     print(f"Figure saved at {filename}")
     plt.show()
 
+def compute_metrics(pred):
+    labels = pred.label_ids
+    preds = pred.predictions
+
+    if len(preds.shape) == 2: # 2D
+        preds = torch.sigmoid(torch.tensor(pred.predictions)).numpy() >= 0.5
+    else: # 3D
+        preds = torch.sigmoid(torch.tensor(pred.predictions[0])).numpy() >= 0.5
+
+    f1_micro = f1_score(labels, preds, average='micro')
+    f1_macro = f1_score(labels, preds, average='macro')
+    acc = accuracy_score(labels, preds)
+    iou_macro = jaccard_score(labels, preds, average='macro') # TODO macro iou?
+    iou_micro = jaccard_score(labels, preds, average='micro')
+
+    result = {
+        'f1_micro': f1_micro,
+        'f1_macro': f1_macro,
+        'accuracy': acc,
+        'iou_macro': iou_macro,
+        'iou_micro': iou_micro,
+    }
+
+    print(f'* Evaluation result: {result}')
+
+    return result
 
 def test(args):
     """
     Temporal test with demo data
     """
 
+    ## TODO !!! - load....
     model, llm_tokenizer, qformer_tokenizer, vision_processor = load_model_tokenizer(args)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -154,16 +252,19 @@ def test(args):
     inputs, labels = demo_dataset(vision_processor, llm_tokenizer, qformer_tokenizer, device)
     images = inputs.pop('images', None)
 
-    outputs = model.generate(
-        **inputs,
-        do_sample=False,
-        num_beams=5,
-        max_length=256,
-        min_length=1,
-        repetition_penalty=1.5,
-        length_penalty=1.0,
-        temperature=1,
-    )
+    # outputs = model.generate(
+    #     **inputs,
+    #     do_sample=False,
+    #     num_beams=5,
+    #     max_length=256,
+    #     min_length=1,
+    #     repetition_penalty=1.5,
+    #     length_penalty=1.0,
+    #     temperature=1,
+    # )
+    outputs = model(**inputs)
+    labels_one_hot = to_one_hot(labels)
+    result = compute_metrics(EvalPrediction(predictions=outputs.logits.cpu(), label_ids=labels_one_hot))
 
     pretty_print(outputs, images, labels, llm_tokenizer, save_path=args.model_dir)
     print()
@@ -174,7 +275,7 @@ if __name__ == '__main__':
     args = parse_args()
     ##
     args.project_name = 'BERT'
-    args.check_point = 'checkpoint-22816'
+    args.check_point = 'checkpoint-32240'
     args.bert_name = 'bert-large-uncased'
     ##
     setup_path(args)
