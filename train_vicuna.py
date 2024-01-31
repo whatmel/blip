@@ -34,7 +34,7 @@ def parse_args():
 
     parser.add_argument('--project_name', type=str, default='T5_f1')
     # /path/to/Recipe1M/dataset
-    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/code/donghee/inversecooking/data', help='path containing Recipe1M dataset')
+    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=16)
@@ -79,7 +79,7 @@ class DecoderEvalMetrics():
     
     def __init__(self, tokenizer, eval_dataset):
         self.tokenizer = tokenizer
-        self.ingr2id = pickle.load(open('/nfs_share2/code/donghee/inversecooking/data/recipe1m_vocab_ingrs.pkl', 'rb')).word2idx
+        self.ingr2id = pickle.load(open('/nfs_share2/shared/from_donghee/recipe1m_data/recipe1m_vocab_ingrs.pkl', 'rb')).word2idx
         label_ids2ingr_class = dict()
         for entry in eval_dataset:
             label_ids2ingr_class[tuple(entry['label_ids'])] = entry['ingredient_int']

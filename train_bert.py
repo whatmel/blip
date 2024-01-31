@@ -33,7 +33,7 @@ def parse_args():
 
     parser.add_argument('--project_name', type=str, default='BERT_vit_train_pretrained_qformer')
     # /path/to/Recipe1M/dataset
-    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/code/donghee/inversecooking/data', help='path containing Recipe1M dataset')
+    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=128) 
@@ -268,7 +268,7 @@ if __name__ == '__main__':
     args.training_samples = 64
     args.epochs = 1
     # args.train_llm = False
-    args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/BERT/checkpoint-32240'
+    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/BERT/checkpoint-32240'
     args.batch_size = 64
     # args.train_vit = True
     # args.eval_steps = 10

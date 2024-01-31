@@ -35,7 +35,7 @@ def parse_args():
 
     parser.add_argument('--project_name', type=str, default='clip_QT5')
     # /path/to/Recipe1M/dataset
-    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/code/donghee/inversecooking/data', help='path containing Recipe1M dataset')
+    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=16)

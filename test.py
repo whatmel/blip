@@ -86,8 +86,8 @@ def load_model_tokenizer(args):
     return model, llm_tokenizer, qformer_tokenizer, vision_processor
 
 def retrieve_recipe1m(test_dict):
-    dataset = pickle.load(open('/nfs_share2/code/donghee/inversecooking/data/recipe1m_test.pkl', 'rb'))
-    ingrs_vocab = pickle.load(open('/nfs_share2/code/donghee/inversecooking/data/recipe1m_vocab_ingrs.pkl', 'rb'))
+    dataset = pickle.load(open('/nfs_share2/shared/from_donghee/recipe1m_data/recipe1m_test.pkl', 'rb'))
+    ingrs_vocab = pickle.load(open('/nfs_share2/shared/from_donghee/recipe1m_data/recipe1m_vocab_ingrs.pkl', 'rb'))
     max_num_labels = 20
     test_ids = set([entry['id'] for entry in test_dict])
 

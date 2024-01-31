@@ -26,7 +26,7 @@ def parse_args():
 
     parser.add_argument('--project_name', type=str, default='ViT_only')
     # /path/to/Recipe1M/dataset
-    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/code/donghee/inversecooking/data', help='path containing Recipe1M dataset')
+    parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=128) 
@@ -178,7 +178,7 @@ if __name__ == '__main__':
     # args.eval_samples = -1
     # args.test_samples = 10000
     args.model_name = 'google/vit-huge-patch14-224-in21k'
-    args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/ViT_only/checkpoint-23000'
+    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/ViT_only/checkpoint-23000'
     ####
 
     pretty_print(args)
