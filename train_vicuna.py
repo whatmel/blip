@@ -32,7 +32,7 @@ def pretty_print(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Training script for distributed InstructBlip.")
 
-    parser.add_argument('--project_name', type=str, default='T5_f1')
+    parser.add_argument('--project_name', type=str, default='vicuna')
     # /path/to/Recipe1M/dataset
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 

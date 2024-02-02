@@ -106,6 +106,7 @@ def compute_metrics(pred): # TODO location
 
 def train(args):
     model = QT5InstructBlipForConditionalGeneration.from_pretrained(args.model_name)
+    # TODO better way to reinit
     model.reinit(num_query=args.num_query)
     processor = InstructBlipProcessor.from_pretrained(args.model_name)
     processor.save_pretrained(os.path.join(args.output_dir, 'best'))
@@ -176,14 +177,15 @@ if __name__ == '__main__':
     setup_logger(args)
 
     ###
-    args.batch_size = 64
-    # args.training_samples = 64
-    args.eval_samples = 1500
+    args.batch_size = 16
+    args.training_samples = 32
+    args.eval_samples = 32
     # args.eval_steps = 200
     # args.logging_steps = 50
     args.epochs=30
     args.num_query = 1
-    args.project_name = 't5_learnable_query1'
+    # args.project_name = 't5_learnable_query1'
+    args.project_name = 'temp'
     # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/T5_learnable_query16/best'
     ###
 

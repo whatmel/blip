@@ -9,7 +9,7 @@ import random
 import torch
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import InstructBlipProcessor, TrainingArguments, Trainer, DataCollatorForSeq2Seq
+from transformers import InstructBlipProcessor, TrainingArguments, Trainer, DataCollatorForSeq2Seq, InstructBlipConfig
 from sklearn.metrics import f1_score, accuracy_score, jaccard_score
 
 from data.dataset import load_datasets, CustomDataCollator, collator, Recipe1M_Collator, load_datasets_for_distributed
@@ -54,6 +54,7 @@ def parse_args():
         help="Specifies the model to use. Choose from 'Salesforce/instructblip-flan-t5-xl' (default), "
             "'Salesforce/instructblip-flan-t5-xxl', or 'Salesforce/instructblip-vicuna-7b'."
     )
+    parser.add_argument('--clip_model', type=str, default='openai/clip-vit-large-patch14-336',help="clip-vit model")
 
     args = parser.parse_args()
     
@@ -68,11 +69,14 @@ def parse_args():
 
 
 def train(args):
-    model = CLIP_QT5InstructBlipForConditionalGeneration.from_pretrained(args.model_name)
-    model.reinit(num_query=args.num_query)
+    config = InstructBlipConfig()
+    model = CLIP_QT5InstructBlipForConditionalGeneration(config)
+
+    # model = CLIP_QT5InstructBlipForConditionalGeneration.from_pretrained(args.model_name)
+    # model.reinit(num_query=args.num_query, clip_model=args.clip_model)
 
     processor = CLIP_QT5InstructBlipProcessor.from_pretrained(args.model_name)
-    processor.to_clip()
+    processor.to_clip(args.clip_model) # TODO better way
     processor.save_pretrained(os.path.join(args.output_dir, 'best'))
 
     datasets = load_datasets( 
@@ -93,7 +97,7 @@ def train(args):
         logging_dir=args.logging_dir,
         logging_strategy = 'steps',
         logging_steps=args.logging_steps,
-        do_train=False, ## True !!
+        do_train=True, ## True !!
         do_eval=True,
         output_dir=args.output_dir,
         save_strategy="steps",
@@ -138,12 +142,12 @@ if __name__ == '__main__':
     setup_logger(args)
 
     ###
-    args.batch_size = 64
-    args.training_samples = 64
-    args.eval_samples = 64
+    args.batch_size = 32
+    # args.training_samples = 32
+    # args.eval_samples = 32
     # args.eval_steps = 200
     # args.logging_steps = 50
-    args.epochs=30
+    args.epochs = 30
     args.num_query = 1
     args.project_name = 'clip_QT5'
     # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/T5_learnable_query16/best'
