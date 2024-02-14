@@ -30,7 +30,7 @@ def pretty_print(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Training script for distributed InstructBlip.")
 
-    parser.add_argument('--project_name', type=str, default='BERT_vit_train_pretrained_qformer')
+    parser.add_argument('--project_name', type=str, default='temp') ## TODO 'clip_BERT'
     # /path/to/Recipe1M/dataset
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 
@@ -71,8 +71,9 @@ def parse_args():
     if args.bert_name is not None:
         args.encoder_only = True
     
-    args.output_dir= os.path.join("./outputs", args.project_name)
+    args.output_dir= os.path.join("./outputs", args.project_name) ## TODO if exist, add calendar time
     args.logging_dir = os.path.join('./logs', args.project_name)
+
     if 't5' in args.model_name:
         args.decoder_only = False
     else:
@@ -280,7 +281,7 @@ if __name__ == '__main__':
     # args.training_samples = 64
     # args.epochs = 10
     # args.train_llm = False
-    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/BERT/checkpoint-32240'
+    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/clip_BERT/checkpoint-17500'
     args.batch_size = 64
     # args.train_vit = True
     # args.eval_steps = 10

@@ -142,15 +142,15 @@ if __name__ == '__main__':
     setup_logger(args)
 
     ###
-    args.batch_size = 32
-    # args.training_samples = 32
-    # args.eval_samples = 32
-    # args.eval_steps = 200
+    args.batch_size = 64
+    # args.training_samples = 64
+    # args.eval_samples = 64
+    # args.eval_steps = 5
     # args.logging_steps = 50
-    args.epochs = 30
+    args.epochs = 20
     args.num_query = 1
-    args.project_name = 'clip_QT5'
-    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/T5_learnable_query16/best'
+    args.project_name = 'clip_QT5_1'
+    args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/clip_QT5/checkpoint-4000'
     ###
 
     pretty_print(args)
