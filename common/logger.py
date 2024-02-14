@@ -189,6 +189,9 @@ class AttrDict(dict):
 
 
 def setup_logger(args):
+    args.output_dir= os.path.join("./outputs", args.project_name)
+    args.logging_dir = os.path.join('./logs', args.project_name)
+    
     if dist_utils.is_main_process():
         # TODO sometimes error..
         if not os.path.exists(args.output_dir):
@@ -211,4 +214,5 @@ def setup_logger(args):
 
         logging.getLogger().addHandler(console_handler)
     else:
-        logging.basicConfig(level=logging.WARN)
+        # logging.basicConfig(level=logging.WARN)
+        logging.disable(logging.CRITICAL)

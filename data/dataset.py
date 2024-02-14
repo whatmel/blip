@@ -295,6 +295,79 @@ def load_image_datasets(
     return datasets
     
 
+def llava_load_datasets(
+        processor,
+        data_dir,
+        training_samples = -1,
+        eval_samples = 1500,
+        test_samples = -1,
+        max_num_labels = 20,
+        pre_map = False,
+        decoder_only = True,
+        encoder_only = False,
+        load_from_cache_file = True,
+    ) -> Dict[str, hf_Dataset]:
+
+    if not pre_map:
+        logging.info('batches of data are processed on-the-fly')
+
+    if training_samples != -1:
+        logging.info(f"Limiting the number of training samples to {training_samples}")
+    
+    if not pre_map:
+        logging.info('batches of data are processed on-the-fly')
+
+    if training_samples != -1:
+        logging.info(f"Limiting the number of training samples to {training_samples}")
+    
+    def process_data(example):
+        if decoder_only:
+            inputs = processor(text=example['text_input_output'], images=np.array(example['image']), return_tensors='pt', padding='max_length', max_length=128)
+            inputs['labels'] = processor(text=example['text_output'], return_tensors='pt', padding='max_length', max_length=128).input_ids
+            # TODO what if inputs['input_ids'] have different length?
+        return inputs
+
+    datasets = dict()
+    features = Features({
+        'image': Array3D(dtype="float32", shape=(3, 256, 256)),  # Assuming image converted to 3D array
+        'text_input': Value(dtype='string'),
+        'text_output': Value(dtype='string'),
+        'text_input_output': Value(dtype='string'),
+        'ingredient_int': Sequence(feature=Value(dtype='int64'))
+    })
+
+    for split in ['train', 'val', 'test']:
+        # max_num_samples = eval_samples if split in ['val', 'test'] else training_samples
+        if split == 'train':
+            max_num_samples = training_samples
+        elif split == 'val':
+            max_num_samples = eval_samples
+        else:
+            max_num_samples = test_samples
+
+        # Define a lambda function that includes the arguments
+        generator_function = lambda split=split, max_num_samples=max_num_samples: recipe1m_generator(
+            processor=processor,
+            data_dir=data_dir,
+            split=split,
+            max_num_labels=max_num_labels,
+            max_num_samples=max_num_samples,
+        )
+
+        gen_dataset = hf_Dataset.from_generator(
+            generator = generator_function,
+            features = features,
+        )
+        if pre_map:
+            datasets[split] = gen_dataset.map(process_data, batched=True, load_from_cache_file=load_from_cache_file)
+        else:
+            datasets[split] = gen_dataset
+
+    del gen_dataset
+
+    return datasets
+    
+
 def load_datasets(
         processor,
         data_dir, 

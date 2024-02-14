@@ -14,58 +14,35 @@ from transformers import (
     T5Model
 )
 from transformers.modeling_outputs import Seq2SeqSequenceClassifierOutput
-from transformers import InstructBlipVisionModel, InstructBlipQFormerModel
+from transformers import InstructBlipVisionModel, InstructBlipQFormerModel, AutoModel, AutoConfig
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from transformers.models.instructblip.modeling_instructblip import InstructBlipForConditionalGenerationModelOutput, InstructBlipPreTrainedModel
 from transformers.models.auto import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 
-# from .modeling_t5 import OrderInvariantT5ForConditionalGeneration
+from .modeling_t5 import QT5ForConditionalGeneration
 
-class BERTInstructBlipForConditionalGeneration(InstructBlipForConditionalGeneration):
-    # TODO
+class BERTInstructBlipForConditionalGeneration(InstructBlipPreTrainedModel):
     config_class = InstructBlipConfig
     main_input_name = "pixel_values"
 
-    def __init__(self, bert_name, train_llm=False, train_vit=False):
-        # 1. vision_model 2. language_model 3. qformer 4. query_tokens 5. language_projection
+    def __init__(self, bert_name, train_llm=False, train_vit=False, num_labels=1488):
         config = InstructBlipConfig()
-
-        super().__init__(config)
-        # Done initialization - qformer, query_tokens
-
-        self.bert_name = bert_name
-        self.num_labels = 1488
-        self.qformer_hidden_size = config.qformer_config.hidden_size
-
-        language_model = BertForSequenceClassification.from_pretrained(bert_name, problem_type="multi_label_classification", num_labels=self.num_labels)
-        # bert-base-uncased: 110M
-
-        self.language_projection = nn.Linear(self.qformer_hidden_size, language_model.config.hidden_size)
+        config.use_decoder_only_language_model = False
         
-        self.post_init() # re-init language projection layer
+        super().__init__(config)
+        
+        self.num_labels = num_labels
 
-        # overwrite ViT, BERT weight
         self.vision_model = InstructBlipForConditionalGeneration.from_pretrained("Salesforce/instructblip-flan-t5-xl").vision_model
 
-        if language_model._no_split_modules is not None:
-            self._no_split_modules.extend(language_model._no_split_modules)
-
-        if language_model._keep_in_fp32_modules is not None:
-            self._keep_in_fp32_modules.extend(language_model._keep_in_fp32_modules)
-
-        self.language_model = language_model
-        self.backbone_freeze(train_llm, train_vit)
-
-    def to_bert(self, bert_name, train_llm=False):
-        self.num_labels = 1488
+        self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
+        # self.qformer = InstructBlipQFormerModel(config.qformer_config)
+        self.qformer = InstructBlipForConditionalGeneration.from_pretrained("Salesforce/instructblip-flan-t5-xl").qformer # pretrained qformer
 
         language_model = BertForSequenceClassification.from_pretrained(bert_name, problem_type="multi_label_classification", num_labels=self.num_labels)
-        # bert-base-uncased: 110M
-
-        self.language_projection = nn.Linear(self.qformer_hidden_size, language_model.config.hidden_size)
-
+        
         if language_model._no_split_modules is not None:
             self._no_split_modules.extend(language_model._no_split_modules)
 
@@ -74,7 +51,59 @@ class BERTInstructBlipForConditionalGeneration(InstructBlipForConditionalGenerat
 
         self.language_model = language_model
 
-        self.backbone_freeze(train_llm)
+        self.language_projection = nn.Linear(config.qformer_config.hidden_size, self.language_model.config.hidden_size)
+
+        self.post_init()
+        self.backbone_freeze(train_llm, train_vit)
+
+
+    # def __init__(self, bert_name, train_llm=False, train_vit=False, num_labels=1488):
+    #     # 1. vision_model 2. language_model 3. qformer 4. query_tokens 5. language_projection
+    #     config = InstructBlipConfig()
+
+    #     super().__init__(config)
+    #     # Done initialization - qformer, query_tokens
+
+    #     self.bert_name = bert_name
+    #     self.num_labels = num_labels
+    #     self.qformer_hidden_size = config.qformer_config.hidden_size
+
+    #     language_model = BertForSequenceClassification.from_pretrained(bert_name, problem_type="multi_label_classification", num_labels=self.num_labels)
+    #     # bert-base-uncased: 110M
+
+    #     self.language_projection = nn.Linear(self.qformer_hidden_size, language_model.config.hidden_size)
+        
+    #     self.post_init() # re-init language projection layer
+
+    #     # overwrite ViT, BERT weight
+    #     self.vision_model = InstructBlipForConditionalGeneration.from_pretrained("Salesforce/instructblip-flan-t5-xl").vision_model
+
+    #     if language_model._no_split_modules is not None:
+    #         self._no_split_modules.extend(language_model._no_split_modules)
+
+    #     if language_model._keep_in_fp32_modules is not None:
+    #         self._keep_in_fp32_modules.extend(language_model._keep_in_fp32_modules)
+
+    #     self.language_model = language_model
+    #     self.backbone_freeze(train_llm, train_vit)
+
+    # def to_bert(self, bert_name, train_llm=False): # no use. temp
+    #     self.num_labels = 1488
+
+    #     language_model = BertForSequenceClassification.from_pretrained(bert_name, problem_type="multi_label_classification", num_labels=self.num_labels)
+    #     # bert-base-uncased: 110M
+
+    #     self.language_projection = nn.Linear(self.qformer_hidden_size, language_model.config.hidden_size)
+
+    #     if language_model._no_split_modules is not None:
+    #         self._no_split_modules.extend(language_model._no_split_modules)
+
+    #     if language_model._keep_in_fp32_modules is not None:
+    #         self._keep_in_fp32_modules.extend(language_model._keep_in_fp32_modules)
+
+    #     self.language_model = language_model
+
+    #     self.backbone_freeze(train_llm)
     
     def backbone_freeze(self, train_llm=False, train_vit=False):
 
@@ -399,38 +428,56 @@ class FreezeInstructBlipForConditionalGeneration(InstructBlipForConditionalGener
         )
 
 
-class QT5InstructBlipForConditionalGeneration(InstructBlipForConditionalGeneration):
+class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
+    config_class = InstructBlipConfig
+    main_input_name = 'pixel_values'
+
     def __init__(self, config):
-        # config = InstructBlipConfig(model_name)
         super().__init__(config)
-        # TODO - from_pretrained에서 어떻게 불러오고 이걸 또 어떻게 init 하는지...
-        self.num_labels = 1488
-        # self.classification_head = nn.Linear(self.language_model.config.hidden_size, self.num_labels)
-        # self.loss_fct = BCEWithLogitsLoss()
 
-        # self.post_init() # TODO
+        self.vision_model = InstructBlipVisionModel(config.vision_config)
 
-        # num_decoder_query_token = 1 # TODO
-        # self.decoder_query_tokens = nn.Parameter(
-        #     torch.zeros(1, num_decoder_query_token, self.language_model.config.hidden_size)
-        # )
-        # self.decoder_query_tokens.data.normal_(mean=0.0, std=0.02) # TODO std
+        self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
+        self.qformer = InstructBlipQFormerModel(config.qformer_config)
 
-        # self.backbone_freeze()
-    
-    def reinit(self, num_query=8, num_labels=1488):
-        self.num_labels = num_labels
-        self.num_query = num_query # TODO when num_query > 1, need to adjust attention_mask? to remove auto-regressive nature?
-        assert self.language_model.config.hidden_size % num_query == 0
-        self.reduction_size = self.language_model.config.hidden_size // self.num_query
+        self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
         
-        self.reduction_layer = nn.Linear(self.language_model.config.hidden_size, self.reduction_size)
-        self.classification_head = nn.Linear(self.language_model.config.hidden_size, self.num_labels)
+        language_model = QT5ForConditionalGeneration(config.text_config)
+
+        if language_model._no_split_modules is not None:
+            self._no_split_modules.extend(language_model._no_split_modules)
+
+        if language_model._keep_in_fp32_modules is not None:
+            self._keep_in_fp32_modules.extend(language_model._keep_in_fp32_modules)
+
+        self.language_model = language_model
+
+        self.final_dropout = nn.Dropout(config.text_config.dropout_rate)
+
+        self.post_init()
+    
+    def learnable_query_init(self, num_query=8, num_labels=1488, freeze_qformer=False):
+        self.num_query = num_query
+        self.num_labels = num_labels
+        self.freeze_qformer = freeze_qformer
+
+        language_hidden = self.language_model.config.hidden_size
+
+        # assert self.language_model.config.hidden_size % num_query == 0
+        # self.reduction_size = self.language_model.config.hidden_size // self.num_query
+        
+        # self.reduction_layer = nn.Linear(self.language_model.config.hidden_size, self.reduction_size)
+        combine_layer_size = language_hidden * self.num_query
+        self.combine_layer = nn.Linear(combine_layer_size, language_hidden)
+        self.classification_head = nn.Linear(language_hidden, self.num_labels)
+        
         self.loss_fct = BCEWithLogitsLoss()
         self.decoder_query_tokens = nn.Parameter(
-            torch.zeros(1, self.num_query, self.language_model.config.hidden_size)
+            torch.zeros(1, self.num_query, language_hidden)
         )
         self.decoder_query_tokens.data.normal_(mean=0.0, std=0.02) # TODO std
+        
+        self.post_init() ## to init reduction_layer, classification_head 
         
         self.backbone_freeze()
     
@@ -440,6 +487,10 @@ class QT5InstructBlipForConditionalGeneration(InstructBlipForConditionalGenerati
 
         for param in self.language_model.parameters():
             param.requires_grad = False
+        
+        if self.freeze_qformer:
+            for param in self.qformer.parameters():
+                param.requires_grad = False
         
         self.set_ignore_keys()
 
@@ -565,10 +616,10 @@ class QT5InstructBlipForConditionalGeneration(InstructBlipForConditionalGenerati
             attention_mask = torch.ones_like(input_ids)
         attention_mask = torch.cat([language_model_attention_mask.to(attention_mask.device), attention_mask], dim=1)
 
-        ## HERE ##
+        ## HERE: learnable query ##
         bs = input_ids.shape[0]
         decoder_query_tokens = self.decoder_query_tokens.expand(bs, -1, -1) # (batch_size, num_query, 2048)
-        decoder_query_atts = torch.ones(decoder_query_tokens.size()[:-1], dtype=torch.long).to(input_ids.device) # (batch_size, num_query)
+        decoder_query_atts = torch.ones(decoder_query_tokens.size()[:-1], dtype=torch.long).to(input_ids.device) # (batch_size, num_query) # 0 when padding?
         ##
 
         outputs = self.language_model(
@@ -585,10 +636,16 @@ class QT5InstructBlipForConditionalGeneration(InstructBlipForConditionalGenerati
 
         last_hidden_state = outputs.decoder_hidden_states[-1] # (batch_size, num_query, 2048)
 
-        reduced_query = self.reduction_layer(last_hidden_state) # (batch_size, num_query, 2048%num_query) # 256
-        reduced_query = reduced_query.view(bs, -1) # (batch_size, 2048)
+        # Concat queries -> combine layer -> dropout -> classification
+        concatenated_last_hidden_state = last_hidden_state.view(bs, -1) # (batch_size, num_query * 2048)
+        combine_query_output = self.combine_layer(concatenated_last_hidden_state) # (batch_size, 2048)
+        combine_query_output = self.final_dropout(combine_query_output)
+        
+        # reduced_query = self.reduction_layer(last_hidden_state) # (batch_size, num_query, 2048%num_query) # 256
+        # reduced_query = reduced_query.view(bs, -1) # (batch_size, 2048)
 
-        logits = self.classification_head(reduced_query) # (batch_size, num_label)
+        logits = self.classification_head(combine_query_output) # (batch_size, num_label)
+        
         if self.num_query == 1:
             logits.squeeze_(1) ## in place
         loss = self.loss_fct(logits, labels)
@@ -1221,7 +1278,7 @@ class CLIP_BERTInstructBlipForConditionalGeneration(InstructBlipPreTrainedModel)
     main_input_name = "pixel_values"
 
     def __init__(self, config: InstructBlipConfig, clip_model='openai/clip-vit-large-patch14-336', bert_name='bert-large-uncased', num_labels=1488):
-        config.vision_config = clip_model # TODO config.qformer_config check. maybe vision->qformer project matrix 안 맞을듯
+        config.vision_config = clip_model 
         config.use_decoder_only_language_model = False
         
         super().__init__(config)
@@ -1231,7 +1288,7 @@ class CLIP_BERTInstructBlipForConditionalGeneration(InstructBlipPreTrainedModel)
         config.qformer_config.encoder_hidden_size = self.vision_model.config.hidden_size # 1024
 
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size)) # 768
-        self.qformer = InstructBlipQFormerModel(config.qformer_config)
+        self.qformer = InstructBlipQFormerModel(config.qformer_config) # __init__ call 될 때마다 다르게 init
 
         language_model = BertForSequenceClassification.from_pretrained(bert_name, problem_type="multi_label_classification", num_labels=self.num_labels)
         # bert-base-uncased: 110M
@@ -1247,6 +1304,8 @@ class CLIP_BERTInstructBlipForConditionalGeneration(InstructBlipPreTrainedModel)
         self.language_model = language_model
 
         # Initialize weights and apply final processing
+        # self.post_init(): additional initialization steps that are not covered by the constructors of the individual components.
+        # self.vision_mode, self.qformer, self.language_model, self.query_tokens are already properly initialized through pre-trained weights or their own constructors -> only self.language_projection is being initialized
         self.post_init()
 
         self.backbone_freeze()

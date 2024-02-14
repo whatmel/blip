@@ -9,12 +9,12 @@ import random
 import torch
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import InstructBlipProcessor, TrainingArguments, Trainer, DataCollatorForSeq2Seq
+from transformers import InstructBlipProcessor, TrainingArguments, Trainer, DataCollatorForSeq2Seq, InstructBlipConfig, InstructBlipForConditionalGeneration
 from sklearn.metrics import f1_score, accuracy_score, jaccard_score
 
 from data.dataset import load_datasets, CustomDataCollator, collator, Recipe1M_Collator, load_datasets_for_distributed
 from data.utils import Vocabulary, to_one_hot
-from model.modeling_instructblip import QT5InstructBlipForConditionalGeneration
+from model.modeling_instructblip import QT5InstructBlipForClassification
 from common.dist_utils import init_distributed_mode
 from common.logger import setup_logger
 from common.compute_metrics import compute_metrics_thre
@@ -32,12 +32,12 @@ def pretty_print(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Training script for distributed InstructBlip.")
 
-    parser.add_argument('--project_name', type=str, default='T5_learnable_query')
+    parser.add_argument('--project_name', type=str, default='temp')
     # /path/to/Recipe1M/dataset
     # /nfs_share2/shared/from_donghee/recipe1m_data
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 
-    parser.add_argument('--epochs', type=int, default=5)
+    parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--training_samples', type=int, default=-1, help='number of training sample. set to -1 for training on entire dataset')
     parser.add_argument('--eval_samples', type=int, default=1000, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
@@ -45,6 +45,8 @@ def parse_args():
     parser.add_argument('--logging_steps', type=int, default=100, help='number of steps between two logs')
     parser.add_argument('--pre_map', type=bool, default=True, help='process data before forward')
     parser.add_argument('--num_query', type=int, default=8, help='number of learnable query passed to decoder')
+    parser.add_argument('--num_labels', type=int, default=1488, help='number of labels for classification')
+    parser.add_argument('--freeze_qformer', type=bool, default=False, help='if True, qformer is being freeze during training')
 
     parser.add_argument(
         '--model_name', 
@@ -57,8 +59,9 @@ def parse_args():
 
     args = parser.parse_args()
     
-    args.output_dir= os.path.join("./outputs", args.project_name)
-    args.logging_dir = os.path.join('./logs', args.project_name)
+    # args.output_dir= os.path.join("./outputs", args.project_name)
+    # args.logging_dir = os.path.join('./logs', args.project_name)
+    
     if 't5' in args.model_name:
         args.decoder_only = False
     else:
@@ -105,11 +108,18 @@ def compute_metrics(pred): # TODO location
     return result
 
 def train(args):
-    model = QT5InstructBlipForConditionalGeneration.from_pretrained(args.model_name)
+    model = QT5InstructBlipForClassification.from_pretrained(args.model_name)
+    model.learnable_query_init(num_query=args.num_query, num_labels=args.num_labels, freeze_qformer=args.freeze_qformer)
     # TODO better way to reinit
-    model.reinit(num_query=args.num_query)
+    
+    # model = InstructBlipForConditionalGeneration.from_pretrained(args.model_name)
+
+    # for m in model.modules():
+    #     for param in m.parameters():
+    #         param.requires_grad = False
+    
+    # model.reinit(num_query=args.num_query)
     processor = InstructBlipProcessor.from_pretrained(args.model_name)
-    processor.save_pretrained(os.path.join(args.output_dir, 'best'))
 
     datasets = load_datasets( 
         processor=processor, 
@@ -119,6 +129,7 @@ def train(args):
         pre_map=args.pre_map,
         decoder_only=args.decoder_only
     )
+    processor.save_pretrained(os.path.join(args.output_dir, 'best'))
     
     training_args = TrainingArguments(
         per_device_train_batch_size=args.batch_size,
@@ -129,7 +140,7 @@ def train(args):
         logging_dir=args.logging_dir,
         logging_strategy = 'steps',
         logging_steps=args.logging_steps,
-        do_train=False, ## True !!
+        do_train=True, ## True !!
         do_eval=True,
         output_dir=args.output_dir,
         save_strategy="steps",
@@ -143,7 +154,7 @@ def train(args):
         # include_inputs_for_metrics=True,
         # remove_unused_columns= False ## TODO
     )
-    # print("No TRAIN!!")
+    
     # TODO: compute_metrics
     trainer = Trainer( 
         model=model,
@@ -151,7 +162,7 @@ def train(args):
         train_dataset=datasets['train'],
         eval_dataset=datasets['val'],
         # data_collator = CustomDataCollator(tokenizer=processor.tokenizer, model=model)
-        compute_metrics=compute_metrics_thre, ## compute_metrics
+        compute_metrics=compute_metrics_thre, 
         # data_collator=data_collator
         # metric_class = eval_metrics,
     )
@@ -164,7 +175,6 @@ def train(args):
     print(eval_result)
 
     # Save
-    # processor.save_pretrained(os.path.join(args.output_dir, 'best'))
     model.save_pretrained_final(os.path.join(args.output_dir, 'best'))
 
     print("* Test start *")
@@ -174,21 +184,21 @@ def train(args):
 
 if __name__ == '__main__':
     args = parse_args()
-    setup_logger(args)
 
     ###
-    args.batch_size = 16
-    args.training_samples = 32
-    args.eval_samples = 32
-    # args.eval_steps = 200
-    # args.logging_steps = 50
-    args.epochs=30
-    args.num_query = 1
-    # args.project_name = 't5_learnable_query1'
-    args.project_name = 'temp'
+    # args.batch_size = 16
+    # args.training_samples = 2048
+    # args.eval_samples = 128
+    # args.eval_steps = 50
+    # args.logging_steps = 10
+    # args.epochs = 3
+    # args.num_query = 4
+    args.project_name = 't5_learnable_query8'
+    # args.project_name = 'temp'
     # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/T5_learnable_query16/best'
     ###
 
+    setup_logger(args)
     pretty_print(args)
 
     train(args)

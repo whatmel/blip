@@ -20,7 +20,6 @@ from common.logger import setup_logger
 from common.compute_metrics import compute_metrics_thre
 
 # TODO
-# 2. compute_metric : F1/IoU 
 # 5. log only main process /
 
 def pretty_print(args):
@@ -31,7 +30,7 @@ def pretty_print(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Training script for distributed InstructBlip.")
 
-    parser.add_argument('--project_name', type=str, default='BERT_vit_train_pretrained_qformer')
+    parser.add_argument('--project_name', type=str, default='temp') # 'BERT
     # /path/to/Recipe1M/dataset
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
 
@@ -160,14 +159,20 @@ def compute_metrics_thre(pred):
     
     print(f"max f1 (threshold={max_f1_thre}): {max_f1}, max iou: {max_iou}")
 
-    plot_f1(precisions, recalls, max_f1, max_f1_thre, max_idx)
+    # plot_f1(precisions, recalls, max_f1, max_f1_thre, max_idx)
+
+    # result = {
+    #     'thresholds': thresholds,
+    #     'precisions': precisions,
+    #     'recalls': recalls,
+    #     'f1s': f1s,
+    #     'ious': ious,
+    # }
 
     result = {
-        'thresholds': thresholds,
-        'precisions': precisions,
-        'recalls': recalls,
-        'f1s': f1s,
-        'ious': ious,
+        'max_f1_thre': max_f1_thre,
+        'max_f1': max_f1,
+        'max_iou': max_iou
     }
 
     return result
@@ -192,9 +197,9 @@ class PrinterCallback(TrainerCallback):
 
 def train(args):
 
-    model = BERTInstructBlipForConditionalGeneration(args.bert_name, args.train_llm, args.train_vit) # TODO better way
+    model = BERTInstructBlipForConditionalGeneration(args.bert_name, args.train_llm, args.train_vit)
     processor = BERTInstructBlipProcessor.from_pretrained(args.model_name) # TODO - better way
-    processor.to_bert(args.bert_name) # TODO
+    processor.to_bert(args.bert_name) 
 
     datasets = load_datasets( 
         processor=processor, 
@@ -255,9 +260,9 @@ def train(args):
 
     print("* Test start *")
     test_results = trainer.evaluate(datasets['test'])
-    with open('BERT_f1_threshold.json', 'w') as f:
-        json.dump(test_results, f, indent=4)
-    print(test_results)
+    # with open('BERT_f1_threshold.json', 'w') as f:
+    #     json.dump(test_results, f, indent=4)
+    # print(test_results)
 
 
 if __name__ == '__main__':
@@ -265,15 +270,15 @@ if __name__ == '__main__':
     setup_logger(args)
 
     ####
-    args.training_samples = 64
-    args.epochs = 1
-    # args.train_llm = False
-    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/BERT/checkpoint-32240'
+    # args.training_samples = 64
+    args.epochs = 15
+    args.train_llm = True
+    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/BERT_train2/checkpoint-5500'
     args.batch_size = 64
     # args.train_vit = True
     # args.eval_steps = 10
-    args.eval_samples = 100
-    args.test_samples = 10000
+    # args.eval_samples = 100
+    # args.test_samples = 10000
     ####
 
     pretty_print(args)
