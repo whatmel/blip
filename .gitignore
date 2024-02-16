@@ -12,3 +12,4 @@ train_t5_OI.py
 *.json
 andrew.py
 *.png
+data/dataset_cache/*

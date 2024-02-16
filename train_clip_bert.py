@@ -237,7 +237,7 @@ def train(args):
         save_steps = args.eval_steps,
         save_total_limit=4,
         load_best_model_at_end=True,
-        metric_for_best_model='loss',
+        # metric_for_best_model='loss',
         dataloader_num_workers=4,
         ddp_find_unused_parameters=False,
         save_safetensors=False,

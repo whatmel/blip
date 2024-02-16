@@ -1,4 +1,5 @@
 import torch
+import os
 
 class Vocabulary(object):
     """Simple vocabulary wrapper."""
@@ -39,45 +40,29 @@ def load_dataset(p):
     """
     pass
 
-def compute_metrics(predictions, ground_truth):
-    # Convert predictions to binary using a threshold (e.g., 0.5)
-    binary_predictions = (predictions > 0.5).float()
-
-    # True Positives
-    TP = (binary_predictions * ground_truth).sum(dim=1)
-    
-    # False Positives
-    FP = (binary_predictions * (1 - ground_truth)).sum(dim=1)
-    
-    # False Negatives
-    FN = ((1 - binary_predictions) * ground_truth).sum(dim=1)
-
-    # Compute metrics for each sample in the batch
-    precision = TP / (TP + FP + 1e-10)
-    recall = TP / (TP + FN + 1e-10)
-    
-    f1_score = 2 * precision * recall / (precision + recall + 1e-10)
-    iou = TP / (TP + FP + FN + 1e-10)
-
-    # Compute average metrics for the batch
-    avg_f1_score = f1_score.mean()
-    avg_iou = iou.mean()
-
-    # return avg_f1_score, avg_iou
-
-    return avg_f1_score, avg_iou
-
 def to_one_hot(labels, num_classes=1488, remove_pad = True):
-
-    one_hot = torch.zeros(labels.size(0), num_classes)
+    """
+    remove_pad should be False other than Recipe1M, which contains pad class
+    """
+    labels = torch.tensor(labels)
+    one_hot = torch.zeros(torch.tensor(labels).size(0), num_classes)
     # one_hot.scatter_(1, labels, 1) # faster version?
-    
-    for i, label in enumerate(labels):
-        if len(label)==0:
-            continue
-        
-        one_hot[i, label] = 1
-        if remove_pad:
-            one_hot[i, [0, num_classes-1]] = 0 # pad remove
+
+    if labels.dim() == 2: # multi-label classification
+        for i, label in enumerate(labels):
+            if len(label)==0:
+                continue
+
+            one_hot[i, label] = 1
+            if remove_pad:
+                one_hot[i, [0, num_classes-1]] = 0 # pad remove
+
+    else: # single-label classification
+        for i, label in enumerate(labels):
+            one_hot[i, label.long()] = 1
 
     return one_hot
+
+def get_cache_file_name(cache_dir, dataset_name, split_name, fine_label):
+    label_type = 'fine' if fine_label else 'coarse'
+    return os.path.join(cache_dir, f"{dataset_name}_{split_name}_{label_type}_preprocessed")

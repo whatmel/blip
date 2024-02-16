@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--training_samples', type=int, default=-1, help='number of training sample. set to -1 for training on entire dataset')
-    parser.add_argument('--eval_samples', type=int, default=1000, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
+    parser.add_argument('--eval_samples', type=int, default=1500, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
     parser.add_argument('--eval_steps', type=int, default=500, help='number of update steps between two evaluations')
     parser.add_argument('--logging_steps', type=int, default=100, help='number of steps between two logs')
     parser.add_argument('--pre_map', type=bool, default=True, help='process data before forward')
@@ -273,7 +273,7 @@ def train(args):
         save_steps=args.eval_steps,
         save_total_limit=4,
         load_best_model_at_end=True,
-        metric_for_best_model='loss',
+        # metric_for_best_model='loss',
         dataloader_num_workers=4,
         ddp_find_unused_parameters=False,
         save_safetensors=False,

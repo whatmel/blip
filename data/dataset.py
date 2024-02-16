@@ -28,6 +28,8 @@ from transformers import DataCollatorWithPadding
 
 from data.utils import Vocabulary, to_one_hot
 
+# TODO better way
+
 class Recipe1MDataset(Dataset):
     """
     This Dataset class is designed to work wirh LMDB files, assuming that the images are pre-stored in a LMDB database.
@@ -53,8 +55,9 @@ class Recipe1MDataset(Dataset):
         self.maxnumims = 5
         self.max_num_labels = max_num_labels
         if max_num_samples != -1: 
-            # randomly sample subset
-            random.shuffle(self.ids)
+            # # randomly sample subset
+            # random.shuffle(self.ids)
+            ## no longer random - for caching
             self.ids = self.ids[:max_num_samples]
 
 
@@ -106,7 +109,7 @@ class Recipe1MDataset(Dataset):
         # idx = index
 
         ingr_gt = sample['ingredients']
-        random.shuffle(ingr_gt)
+        random.shuffle(ingr_gt) ## shuffle ingredients
         ingr_gt = ", ".join(ingr_gt)
         ingr_gt = ingr_gt.replace('_',' ')
         # text_output = self.processor(text=ingr_gt)

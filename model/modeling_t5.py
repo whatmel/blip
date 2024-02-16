@@ -78,6 +78,7 @@ class QT5Stack(T5Stack):
         # ourselves in which case we just need to make it broadcastable to all heads.
         
         ## HERE: bypass auto-regressive by avoiding triangular attention_mask
+        # TODO if, else 통합? 항상 같은 extended_attention_mask?
         if self.is_decoder:
             # Zero: attend, -inf: not attend(mask)
             # All zero: all query attend. No masking to future query

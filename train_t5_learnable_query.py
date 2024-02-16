@@ -9,7 +9,8 @@ import random
 import torch
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import InstructBlipProcessor, TrainingArguments, Trainer, DataCollatorForSeq2Seq, InstructBlipConfig, InstructBlipForConditionalGeneration
+from transformers import InstructBlipProcessor, TrainingArguments, Trainer, DataCollatorForSeq2Seq, InstructBlipConfig, InstructBlipForConditionalGeneration, EarlyStoppingCallback
+
 from sklearn.metrics import f1_score, accuracy_score, jaccard_score
 
 from data.dataset import load_datasets, CustomDataCollator, collator, Recipe1M_Collator, load_datasets_for_distributed
@@ -17,12 +18,14 @@ from data.utils import Vocabulary, to_one_hot
 from model.modeling_instructblip import QT5InstructBlipForClassification
 from common.dist_utils import init_distributed_mode
 from common.logger import setup_logger
-from common.compute_metrics import compute_metrics_thre
+from common.compute_metrics import compute_metrics_thre, compute_metrics_acc
 
 from transformers.trainer_utils import EvalPrediction
+from datasets import load_dataset, DatasetDict
+from data.utils import to_one_hot, get_cache_file_name
 
 # TODO
-# 5. log only main process
+# 1. general datasets
 
 def pretty_print(args):
     args_dict = vars(args)
@@ -36,17 +39,21 @@ def parse_args():
     # /path/to/Recipe1M/dataset
     # /nfs_share2/shared/from_donghee/recipe1m_data
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
+    parser.add_argument('--dataset_name', type=str, default='recipe1m', choices=['recipe1m', 'mnist', 'cifar10', 'cifar100'], help='Hugging face built-in datasets or Recipe1M')
+    parser.add_argument('--dataset_cache_path', type=str, default='/home/donghee/huggingface_data_cache', help='local dataset cache directory')
 
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--training_samples', type=int, default=-1, help='number of training sample. set to -1 for training on entire dataset')
-    parser.add_argument('--eval_samples', type=int, default=1000, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
+    parser.add_argument('--eval_samples', type=int, default=1500, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
     parser.add_argument('--eval_steps', type=int, default=500, help='number of update steps between two evaluations')
     parser.add_argument('--logging_steps', type=int, default=100, help='number of steps between two logs')
     parser.add_argument('--pre_map', type=bool, default=True, help='process data before forward')
     parser.add_argument('--num_query', type=int, default=8, help='number of learnable query passed to decoder')
-    parser.add_argument('--num_labels', type=int, default=1488, help='number of labels for classification')
+    # parser.add_argument('--num_labels', type=int, default=1488, help='number of labels for classification')
     parser.add_argument('--freeze_qformer', type=bool, default=False, help='if True, qformer is being freeze during training')
+    parser.add_argument('--fine_label', type=bool, default=False, help='if True, use fine labels for classification')
+    parser.add_argument('--eval_split_ratio', type=float, default=0.1, help='split ratio for validation set')
 
     parser.add_argument(
         '--model_name', 
@@ -80,36 +87,7 @@ class CustomDataCollator(DataCollatorForSeq2Seq):
 
         return batch
 
-def compute_metrics(pred): # TODO location
-    labels = pred.label_ids
-    preds = pred.predictions
-
-    if len(preds.shape) == 2: # 2D
-        preds = torch.sigmoid(torch.tensor(pred.predictions)).numpy() >= 0.5
-    else: # 3D
-        preds = torch.sigmoid(torch.tensor(pred.predictions[0])).numpy() >= 0.5
-
-    f1_micro = f1_score(labels, preds, average='micro')
-    f1_macro = f1_score(labels, preds, average='macro')
-    acc = accuracy_score(labels, preds)
-    iou_macro = jaccard_score(labels, preds, average='macro') # TODO macro iou?
-    iou_micro = jaccard_score(labels, preds, average='micro')
-
-    result = {
-        'f1_micro': f1_micro,
-        'f1_macro': f1_macro,
-        'accuracy': acc,
-        'iou_macro': iou_macro,
-        'iou_micro': iou_micro,
-    }
-
-    logging.info(f'* Evaluation result: {result}')
-
-    return result
-
 def train(args):
-    model = QT5InstructBlipForClassification.from_pretrained(args.model_name)
-    model.learnable_query_init(num_query=args.num_query, num_labels=args.num_labels, freeze_qformer=args.freeze_qformer)
     # TODO better way to reinit
     
     # model = InstructBlipForConditionalGeneration.from_pretrained(args.model_name)
@@ -118,18 +96,69 @@ def train(args):
     #     for param in m.parameters():
     #         param.requires_grad = False
     
-    # model.reinit(num_query=args.num_query)
     processor = InstructBlipProcessor.from_pretrained(args.model_name)
+    
+    # TODO idenity multi-label classification
+    multi_classification = False
+    ##
 
-    datasets = load_datasets( 
-        processor=processor, 
-        data_dir=args.dataset_path, 
-        training_samples=args.training_samples,
-        eval_samples=args.eval_samples, 
-        pre_map=args.pre_map,
-        decoder_only=args.decoder_only
-    )
+    if args.dataset_name == 'recipe1m':
+        datasets = load_datasets( 
+            processor=processor, 
+            data_dir=args.dataset_path, 
+            training_samples=args.training_samples,
+            eval_samples=args.eval_samples, 
+            pre_map=args.pre_map,
+            decoder_only=args.decoder_only
+        )
+        num_labels = 1488
+        multi_classification = True
+    else:
+        possible_cache_dir = os.path.join(args.dataset_cache_path, args.dataset_name)
+        
+        if os.path.exists(possible_cache_dir):
+            datasets = DatasetDict.load_from_disk(possible_cache_dir)
+            # TODO make class_names compatible to other datasets (coarse label, fine label..)
+            class_names = datasets['train'].features['coarse_label'].names if not args.fine_label else datasets['train'].features['fine_label'].names
+            num_labels = len(class_names)
+        else:
+            datasets = load_dataset(args.dataset_name)
+            # TODO make class_names compatible to other datasets (coarse label, fine label..)
+            class_names = datasets['train'].features['coarse_label'].names if not args.fine_label else datasets['train'].features['fine_label'].names
+            num_labels = len(class_names)
+            class_names = ", ".join(class_names).replace('_', ' ')
+
+            def preprocess_data(examples):
+                text_input = [f'Identify the main object in the image from the following categories: {class_names}']*len(examples['img'])
+                inputs = processor(
+                    images = examples['img'],
+                    text = text_input,
+                    return_tensors='pt',
+                ) # input_ids, attention_mask, qformer_iput_ids, qformer_attention_mask, pixel_values
+
+                inputs['labels'] = to_one_hot(examples['coarse_label'] if not args.fine_label else examples['fine_label'], num_classes = num_labels, remove_pad=False) # one-hot labels
+                
+                return inputs
+            
+            if len(datasets) == 2: # no eval split
+                eval_split_ratio = args.eval_split_ratio # 0.1
+                train_test_split = datasets["train"].train_test_split(test_size=eval_split_ratio)
+                datasets = DatasetDict({
+                    'train': train_test_split['train'],
+                    'val': train_test_split['test'],  # new validation set
+                    'test': datasets['test']
+                })
+            
+            assert len(datasets) == 3
+            datasets = datasets.map(preprocess_data, batched=True)
+            
+            os.makedirs(possible_cache_dir)
+            datasets.save_to_disk(possible_cache_dir) 
+
     processor.save_pretrained(os.path.join(args.output_dir, 'best'))
+
+    model = QT5InstructBlipForClassification.from_pretrained(args.model_name)
+    model.learnable_query_init(num_query=args.num_query, num_labels=num_labels, freeze_qformer=args.freeze_qformer, multi_classification=multi_classification)
     
     training_args = TrainingArguments(
         per_device_train_batch_size=args.batch_size,
@@ -147,7 +176,8 @@ def train(args):
         save_steps=args.eval_steps,
         save_total_limit=4,
         load_best_model_at_end=True,
-        metric_for_best_model='loss',
+        metric_for_best_model='max_f1' if multi_classification else 'accuracy', # not loss!!
+        greater_is_better=True,
         dataloader_num_workers=4,
         ddp_find_unused_parameters=False,
         save_safetensors=False,
@@ -155,16 +185,13 @@ def train(args):
         # remove_unused_columns= False ## TODO
     )
     
-    # TODO: compute_metrics
     trainer = Trainer( 
         model=model,
         args=training_args,
         train_dataset=datasets['train'],
         eval_dataset=datasets['val'],
-        # data_collator = CustomDataCollator(tokenizer=processor.tokenizer, model=model)
-        compute_metrics=compute_metrics_thre, 
-        # data_collator=data_collator
-        # metric_class = eval_metrics,
+        compute_metrics=compute_metrics_thre if multi_classification else compute_metrics_acc,
+        # callbacks=[EarlyStoppingCallback(early_stopping_patience=10)],
     )
 
     # Train the model
@@ -189,13 +216,14 @@ if __name__ == '__main__':
     # args.batch_size = 16
     # args.training_samples = 2048
     # args.eval_samples = 128
-    # args.eval_steps = 50
-    # args.logging_steps = 10
+    # args.eval_steps = 10
+    # args.logging_steps = 5
     # args.epochs = 3
-    # args.num_query = 4
-    args.project_name = 't5_learnable_query8'
+    args.num_query = 8
+    args.project_name = 't5_learnable_query8_cifar100'
     # args.project_name = 'temp'
-    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/T5_learnable_query16/best'
+    # args.resume_from_checkpoint = '/nfs_share2/code/donghee/instructBlip/outputs/t5_learnable_query64/checkpoint-9500'
+    args.dataset_name = 'cifar100'
     ###
 
     setup_logger(args)

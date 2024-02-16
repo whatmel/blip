@@ -3,6 +3,8 @@ from typing import Callable, Optional, Tuple, Union
 import warnings
 import logging
 
+from sklearn.metrics import f1_score, accuracy_score
+import numpy as np
 import torch
 from transformers import (
     InstructBlipForConditionalGeneration, 
@@ -455,11 +457,14 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
         self.final_dropout = nn.Dropout(config.text_config.dropout_rate)
 
         self.post_init()
-    
-    def learnable_query_init(self, num_query=8, num_labels=1488, freeze_qformer=False):
+    # TODO combine with init
+    def learnable_query_init(self, num_query=8, num_labels=1488, freeze_qformer=False, multi_classification=False):
         self.num_query = num_query
         self.num_labels = num_labels
         self.freeze_qformer = freeze_qformer
+        self.multi_classification = multi_classification
+
+        self.loss_fct = BCEWithLogitsLoss if self.multi_classification else CrossEntropyLoss()
 
         language_hidden = self.language_model.config.hidden_size
 
@@ -471,7 +476,6 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
         self.combine_layer = nn.Linear(combine_layer_size, language_hidden)
         self.classification_head = nn.Linear(language_hidden, self.num_labels)
         
-        self.loss_fct = BCEWithLogitsLoss()
         self.decoder_query_tokens = nn.Parameter(
             torch.zeros(1, self.num_query, language_hidden)
         )
@@ -649,13 +653,33 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
         if self.num_query == 1:
             logits.squeeze_(1) ## in place
         loss = self.loss_fct(logits, labels)
+        # output_dict = {
+        #     'loss': loss,
+        #     'logits': logits,
+        # }
+        # output_dict.update(self.get_metrics(logits, labels))
+
+        # return output_dict
 
         return Seq2SeqSequenceClassifierOutput(
             loss=loss,
             logits=logits,
         )
 
-    
+    def get_metrics(self, logits, labels):
+        if self.multi_classification: # f1
+            preds = (logits.sigmoid() > 0.5).int() 
+            # 'micro', 'macro',  'weighted'
+            # TODO debug
+            f1 = f1_score(labels.detach().cpu().numpy(), preds.detach().cpu().numpy(), average='macro') 
+            return {'f1': f1}
+                
+        else: # accuracy
+            preds = np.argmax(logits.detach().cpu().numpy(), axis=-1)
+            preds_one_hot = np.eye(self.num_labels)[preds]
+            accuracy = accuracy_score(labels.detach().cpu().numpy(), preds_one_hot)
+            return {'accuracy': accuracy}
+
     def save_pretrained(
         self,
         save_directory: Union[str, os.PathLike],

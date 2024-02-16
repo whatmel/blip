@@ -5,7 +5,7 @@ from sklearn.metrics import f1_score, accuracy_score, jaccard_score, precision_s
 import numpy as np
 import matplotlib.pyplot as plt
 
-def compute_metrics(pred):
+def compute_metrics_f1(pred):
     labels = pred.label_ids
     preds = pred.predictions
     # TODO
@@ -107,3 +107,16 @@ def compute_metrics_thre(pred): # TODO enable file name pass
     }
 
     return result
+
+def compute_metrics_acc(pred):
+    labels = pred.label_ids
+    logits = pred.predictions
+    num_labels = labels.shape[1]
+    
+    preds = np.argmax(logits, axis=-1)
+    preds_one_hot = np.eye(20)[preds]
+    acc = accuracy_score(labels, preds_one_hot)
+    
+    logging.info(f'* Evaluation Accuray: {acc}')
+
+    return {'accuracy': acc} # TODO
