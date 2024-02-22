@@ -464,7 +464,7 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
         self.freeze_qformer = freeze_qformer
         self.multi_classification = multi_classification
 
-        self.loss_fct = BCEWithLogitsLoss if self.multi_classification else CrossEntropyLoss()
+        self.loss_fct = BCEWithLogitsLoss() if self.multi_classification else CrossEntropyLoss()
 
         language_hidden = self.language_model.config.hidden_size
 
