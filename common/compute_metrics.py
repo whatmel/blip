@@ -149,7 +149,7 @@ class Recipe1mEvalMetrics():
             else:
                 padded_ingr_ids = ingr_ids
             
-            if show_gen_examples and random.random() < 0.02:
+            if show_gen_examples and random.random() < 0.01:
                 logger.info(f"* Generation example: {ingrs}")
             
             batch_ingr_ids.append(padded_ingr_ids[:max_len])  # Ensures the list is not longer than max_len
@@ -160,7 +160,7 @@ class Recipe1mEvalMetrics():
         
         target_ingr = ingredient_ids_one_hot
 
-        pred_ingr = self.map_to_classes(generation_ids)    
+        pred_ingr = self.map_to_classes(generation_ids, show_gen_examples=show_gen_examples)    
         pred_ingr = to_one_hot(torch.tensor(pred_ingr))
         
         f1_micro = f1_score(target_ingr, pred_ingr, average='micro')
