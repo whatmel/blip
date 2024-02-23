@@ -35,7 +35,7 @@ def parse_args():
     # /path/to/Recipe1M/dataset
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
     parser.add_argument('--dataset_name', type=str, default='recipe1m', choices=['recipe1m', 'mnist', 'cifar10', 'cifar100'], help='Hugging face built-in datasets or Recipe1M')
-    parser.add_argument('--dataset_cache_path', type=str, default='/home/donghee/huggingface_data_cache', help='local dataset cache directory')
+    parser.add_argument('--dataset_cache_path', type=str, default='/home/melissa/huggingface_data_cache', help='local dataset cache directory')
 
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=16)
@@ -79,25 +79,30 @@ def train(args):
     possible_cache_dir = os.path.join(args.dataset_cache_path, args.dataset_name)
 
     if args.dataset_name == 'recipe1m':
-        if os.path.exists(possible_cache_dir):
-            logger.info(f"Load {args.dataset_name} from cache")
-            datasets = DatasetDict.load_from_disk(possible_cache_dir)
-            datasets = remove_unused_columns(datasets, args.generate_mode)
-        else:
-            logger.info("* Recipe1M mapping start")
-            datasets = load_datasets( 
-                processor=processor, 
-                data_dir=args.dataset_path, 
-                training_samples=args.training_samples,
-                eval_samples=args.eval_samples, 
-                pre_map=args.pre_map,
-                decoder_only=args.decoder_only
-            )
-            datasets = DatasetDict(datasets)
-            logger.info("* Recipe1M saving start")
+    #     if os.path.exists(possible_cache_dir):
+            
+            # logger.info(f"Load {args.dataset_name} from cache")
+            # datasets = DatasetDict.load_from_disk(possible_cache_dir)
+            # datasets = remove_unused_columns(datasets, args.generate_mode)
+        # else:
+
+        logger.info("* Recipe1M mapping start")
+        datasets = load_datasets( 
+            processor=processor, 
+            data_dir=args.dataset_path, 
+            training_samples=args.training_samples,
+            eval_samples=args.eval_samples, 
+            pre_map=args.pre_map,
+            decoder_only=args.decoder_only
+        )
+        datasets = DatasetDict(datasets)
+        logger.info("* Recipe1M saving start")
+        try:
             os.makedirs(possible_cache_dir)
-            datasets.save_to_disk(possible_cache_dir)
-            logger.info(f"* Save dataset to {possible_cache_dir}") 
+        except FileExistsError:
+                pass  
+        datasets.save_to_disk(possible_cache_dir)
+        logger.info(f"* Save dataset to {possible_cache_dir}") 
         
         num_labels = len(datasets['train'][0]['labels']) ## TODO -2 # 0: <end>, 1487: <pad>
             
