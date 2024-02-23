@@ -73,7 +73,7 @@ def compute_metrics_thre(pred): # TODO enable file name pass
     max_idx = 0
     max_iou = 0
     for idx, thre in enumerate(thresholds):
-        if len(preds.shape) == 2: # 2D
+        if preds.ndim == 2: # 2D
             preds = torch.sigmoid(torch.tensor(pred.predictions)).numpy() >= thre
         else: # 3D
             preds = torch.sigmoid(torch.tensor(pred.predictions[0])).numpy() >= thre
@@ -95,21 +95,12 @@ def compute_metrics_thre(pred): # TODO enable file name pass
         f1s.append(f1_micro)
         ious.append(iou_micro)
     
-    print(f"** max f1 (threshold={max_f1_thre}): {max_f1}, max iou: {max_iou}")
+    # logger.info(f"** max f1 (threshold={max_f1_thre:.2f}): {max_f1:.3f}, max iou: {max_iou:.3f}")
 
-    # plot_f1(precisions, recalls, max_f1, max_f1_thre, max_idx, file_name='vit_baseline.png') # file name
-
-    # result = {
-    #     'thresholds': thresholds,
-    #     'precisions': precisions,
-    #     'recalls': recalls,
-    #     'f1s': f1s,
-    #     'ious': ious,
-    # }
     result = {
-        'max_threshold': max_f1_thre,
-        'max_f1': max_f1,
-        'max_iou': max_iou
+        'max_threshold': round(max_f1_thre, 2),
+        'max_f1': round(max_f1, 3),
+        'max_iou': round(max_iou, 3),
     }
 
     return result
@@ -123,9 +114,9 @@ def compute_metrics_acc(pred):
     preds_one_hot = np.eye(20)[preds]
     acc = accuracy_score(labels, preds_one_hot)
     
-    logger.info(f'* Evaluation Accuray: {acc}')
+    logger.info(f'* Evaluation Accuray: {acc:.3f}')
 
-    return {'accuracy': acc} # TODO
+    return {'accuracy': round(acc,3)} # TODO
 
 class Recipe1mEvalMetrics():
 
