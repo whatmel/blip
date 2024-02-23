@@ -1,7 +1,8 @@
 import os
 from typing import Callable, Optional, Tuple, Union
 import warnings
-import logging
+# import logging
+from transformers.utils import logging
 
 from sklearn.metrics import f1_score, accuracy_score
 import numpy as np
@@ -24,6 +25,8 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 
 from .modeling_t5 import QT5ForConditionalGeneration
+
+logger = logging.get_logger(__name__)
 
 class BERTInstructBlipForConditionalGeneration(InstructBlipPreTrainedModel):
     config_class = InstructBlipConfig
@@ -339,7 +342,6 @@ class BERTInstructBlipForConditionalGeneration(InstructBlipPreTrainedModel):
             language_model_outputs=outputs,
         )
 
-
 class FreezeInstructBlipForConditionalGeneration(InstructBlipForConditionalGeneration):
     def __init__(self, config: InstructBlipConfig):
         super().__init__(config)
@@ -355,14 +357,11 @@ class FreezeInstructBlipForConditionalGeneration(InstructBlipForConditionalGener
     def set_ignore_keys(self, ignore_prefix=('vision_model', 'language_model')):
         """
         Set the _keys_to_ignore_on_save attribute of the model to ignore all keys except those starting with the Q-former prefix.
-
-        Arguments:
-            model (PreTrainedModel): The model whose keys are to be filtered.
-            qformer_prefix (str): The prefix used for the Q-former's parameters.
         """
-        all_keys = self.state_dict().keys()
-        ignore_keys = [key for key in all_keys if key.startswith(ignore_prefix)]
-        self._keys_to_ignore_on_save = set(ignore_keys)
+
+        trainable_keys = [name for name, param in self.named_parameters() if param.requires_grad]
+        no_trained = self.state_dict().keys() - set(trainable_keys) # not trainable params
+        self._keys_to_ignore_on_save = no_trained
 
 
     def save_pretrained(
@@ -472,8 +471,10 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
         # self.reduction_size = self.language_model.config.hidden_size // self.num_query
         
         # self.reduction_layer = nn.Linear(self.language_model.config.hidden_size, self.reduction_size)
-        combine_layer_size = language_hidden * self.num_query
-        self.combine_layer = nn.Linear(combine_layer_size, language_hidden)
+        if self.num_query != 1:
+            combine_layer_size = language_hidden * self.num_query
+            self.combine_layer = nn.Linear(combine_layer_size, language_hidden)
+
         self.classification_head = nn.Linear(language_hidden, self.num_labels)
         
         self.decoder_query_tokens = nn.Parameter(
@@ -499,7 +500,7 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
         self.set_ignore_keys()
 
         num_train_param = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        logging.info(f'* Number of training paramters: {num_train_param}')
+        logger.info(f'* Number of training paramters: {num_train_param}')
     
     def set_ignore_keys(self, ignore_prefix=('vision_model', 'language_model')):
         """
@@ -642,8 +643,12 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
 
         # Concat queries -> combine layer -> dropout -> classification
         concatenated_last_hidden_state = last_hidden_state.view(bs, -1) # (batch_size, num_query * 2048)
-        combine_query_output = self.combine_layer(concatenated_last_hidden_state) # (batch_size, 2048)
-        combine_query_output = self.final_dropout(combine_query_output)
+        if self.num_query != 1:
+            combine_query_output = self.combine_layer(concatenated_last_hidden_state) # (batch_size, 2048)
+            combine_query_output = self.final_dropout(combine_query_output)
+        else: 
+            # if single learnable query, no concatenation and combine layer needed
+            combine_query_output = concatenated_last_hidden_state
         
         # reduced_query = self.reduction_layer(last_hidden_state) # (batch_size, num_query, 2048%num_query) # 256
         # reduced_query = reduced_query.view(bs, -1) # (batch_size, 2048)
@@ -659,9 +664,9 @@ class QT5InstructBlipForClassification(InstructBlipPreTrainedModel):
         # }
         # output_dict.update(self.get_metrics(logits, labels))
 
-        # return output_dict
+        # return output_dict # TODO training accuracy output
 
-        return Seq2SeqSequenceClassifierOutput(
+        return Seq2SeqSequenceClassifierOutput( # TODO find other model output class
             loss=loss,
             logits=logits,
         )
@@ -814,7 +819,7 @@ class CLIP_QT5InstructBlipForConditionalGeneration(InstructBlipPreTrainedModel):
         self.set_ignore_keys()
 
         num_train_param = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        logging.info(f'* Number of training paramters: {num_train_param}')
+        logger.info(f'* Number of training paramters: {num_train_param}')
     
     def set_ignore_keys(self, ignore_prefix=('vision_model', 'language_model')):
         """
@@ -1078,7 +1083,7 @@ class temp_CLIP_QT5InstructBlipForConditionalGeneration(InstructBlipForCondition
         self.set_ignore_keys()
 
         num_train_param = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        logging.info(f'* Number of training paramters: {num_train_param}')
+        logger.info(f'* Number of training paramters: {num_train_param}')
     
     def set_ignore_keys(self, ignore_prefix=('vision_model', 'language_model')):
         """

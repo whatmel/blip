@@ -1,5 +1,6 @@
 import torch
 import os
+from datasets import DatasetDict
 
 class Vocabulary(object):
     """Simple vocabulary wrapper."""
@@ -44,8 +45,9 @@ def to_one_hot(labels, num_classes=1488, remove_pad = True):
     """
     remove_pad should be False other than Recipe1M, which contains pad class
     """
-    labels = torch.tensor(labels)
-    one_hot = torch.zeros(torch.tensor(labels).size(0), num_classes)
+    if not isinstance(labels, torch.Tensor): # TODO labels should be numpy to make it faster
+        labels = torch.tensor(labels)
+    one_hot = torch.zeros(labels.size(0), num_classes)
     # one_hot.scatter_(1, labels, 1) # faster version?
 
     if labels.dim() == 2: # multi-label classification
@@ -55,7 +57,7 @@ def to_one_hot(labels, num_classes=1488, remove_pad = True):
 
             one_hot[i, label] = 1
             if remove_pad:
-                one_hot[i, [0, num_classes-1]] = 0 # pad remove
+                one_hot[i, [0, num_classes-1]] = 0 # pad remove # TODO only for recipe1m
 
     else: # single-label classification
         for i, label in enumerate(labels):
@@ -66,3 +68,20 @@ def to_one_hot(labels, num_classes=1488, remove_pad = True):
 def get_cache_file_name(cache_dir, dataset_name, split_name, fine_label):
     label_type = 'fine' if fine_label else 'coarse'
     return os.path.join(cache_dir, f"{dataset_name}_{split_name}_{label_type}_preprocessed")
+
+def remove_unused_columns(datasets, generate_mode):
+    """
+    remove unused columns from datasets to optimize GPU memory usage
+    """
+    if generate_mode:
+        datasets = datasets.rename_column('labels', 'ingredient_ids_one_hot')
+        datasets = datasets.rename_column('decoder_input_ids', 'labels')
+        datasets['train'] = datasets['train'].remove_columns('ingredient_ids_one_hot')
+    
+    # we don't need decoder_input_ids as it is automatically calculated from labels
+    columns_to_keep = {'pixel_values', 'qformer_input_ids', 'qformer_attention_mask', 'input_ids', 'attention_mask', 'labels', 'ingredient_ids_one_hot'}
+    columns_to_remove = list(set(datasets['train'].column_names) - columns_to_keep)
+    datasets = datasets.remove_columns(columns_to_remove)
+    
+    return datasets
+

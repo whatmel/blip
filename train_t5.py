@@ -1,33 +1,32 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent))
 import json
-import logging
+# import logging
 import os
 import argparse
-import pickle
-from typing import Dict
-import random
 
-import torch
-from torch.utils.data import DataLoader
-from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import InstructBlipProcessor, TrainingArguments, Trainer, DataCollatorForSeq2Seq
-from sklearn.metrics import f1_score, accuracy_score, jaccard_score
+from transformers import InstructBlipProcessor, TrainingArguments, EarlyStoppingCallback
+from transformers.utils import logging 
 
-from data.dataset import load_datasets, CustomDataCollator, collator, Recipe1M_Collator, load_datasets_for_distributed
-from data.utils import Vocabulary, to_one_hot
+from data.dataset import load_datasets
+from datasets import load_dataset, DatasetDict
+from data.utils import Vocabulary, to_one_hot, remove_unused_columns
 from model.modeling_instructblip import FreezeInstructBlipForConditionalGeneration
-from common.dist_utils import init_distributed_mode
-from common.logger import setup_logger
 
-from transformers.trainer_utils import EvalPrediction
+from common.logger import setup_logger
+from common.compute_metrics import Recipe1mEvalMetrics
+from common.trainer import CustomTrainer
 
 # TODO
-# 2. compute_metric : F1/IoU
-# 5. log only main process
+# 5. log only main process (logging, logger)
+
+logger = logging.get_logger(__name__)
 
 def pretty_print(args):
     args_dict = vars(args)
     formatted_args = json.dumps(args_dict, indent=4, sort_keys=True)
-    logging.info("Args: \n"+formatted_args)
+    logger.info("Args: \n"+formatted_args)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Training script for distributed InstructBlip.")
@@ -35,14 +34,19 @@ def parse_args():
     parser.add_argument('--project_name', type=str, default='T5_f1')
     # /path/to/Recipe1M/dataset
     parser.add_argument('--dataset_path', type=str, default='/nfs_share2/shared/from_donghee/recipe1m_data', help='path containing Recipe1M dataset')
+    parser.add_argument('--dataset_name', type=str, default='recipe1m', choices=['recipe1m', 'mnist', 'cifar10', 'cifar100'], help='Hugging face built-in datasets or Recipe1M')
+    parser.add_argument('--dataset_cache_path', type=str, default='/home/donghee/huggingface_data_cache', help='local dataset cache directory')
 
-    parser.add_argument('--epochs', type=int, default=5)
+    parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--training_samples', type=int, default=-1, help='number of training sample. set to -1 for training on entire dataset')
     parser.add_argument('--eval_samples', type=int, default=1500, help='number of eval/test sample. set to -1 for evaluating on entire dataset')
     parser.add_argument('--eval_steps', type=int, default=500, help='number of update steps between two evaluations')
     parser.add_argument('--logging_steps', type=int, default=100, help='number of steps between two logs')
     parser.add_argument('--pre_map', type=bool, default=True, help='process data before forward')
+    parser.add_argument('--fine_label', type=bool, default=False, help='if True, use fine labels for classification')
+    parser.add_argument('--eval_split_ratio', type=float, default=0.1, help='split ratio for validation set')
+    parser.add_argument('--generate_mode', type=bool, default=True, help='True for generation task, False for classification task')
 
     parser.add_argument(
         '--model_name', 
@@ -55,8 +59,9 @@ def parse_args():
 
     args = parser.parse_args()
     
-    args.output_dir= os.path.join("./outputs", args.project_name)
-    args.logging_dir = os.path.join('./logs', args.project_name)
+    # args.output_dir= os.path.join("./outputs", args.project_name)
+    # args.logging_dir = os.path.join('./logs', args.project_name)
+
     if 't5' in args.model_name:
         args.decoder_only = False
     else:
@@ -64,198 +69,83 @@ def parse_args():
 
     return args
 
-class CustomDataCollator(DataCollatorForSeq2Seq):
-    def __call__(self, features):
-        # Call the parent method
-        batch = super().__call__(features)
-
-        # Ensure ingredient_ids are included in the batch
-        ingredient_ids = [feature['ingredient_ids'] for feature in features]
-        batch['ingredient_ids'] = ingredient_ids
-
-        return batch
-
-class DecoderEvalMetrics():
-    
-    def __init__(self, tokenizer, eval_dataset):
-        self.tokenizer = tokenizer
-        self.ingr2id = pickle.load(open('/nfs_share2/shared/from_donghee/recipe1m_data/recipe1m_vocab_ingrs.pkl', 'rb')).word2idx
-        label_ids2ingr_class = dict()
-        for entry in eval_dataset:
-            label_ids2ingr_class[tuple(entry['label_ids'])] = entry['ingredient_int']
-        self.label_ids2ingr_class = label_ids2ingr_class
-
-    def map_to_classes(self, batch_tokens, max_len=20):
-        ingredient_text = self.tokenizer.batch_decode(batch_tokens)
-        
-        # Process all ingredients in a batch together
-        batch_ingr_ids = []
-        for ingrs in ingredient_text:
-            ingr_text = [ingr.strip().replace(' ', '_') for ingr in ingrs.split(',')]
-            ingr_ids = [self.ingr2id.get(ingr, None) for ingr in ingr_text if ingr in self.ingr2id]
-            # batch_ingr_ids.append(ingr_ids)
-
-            # Pad the list to ensure consistent length
-            if max_len > len(ingr_ids):
-                padded_ingr_ids = ingr_ids + [self.ingr2id.get("<pad>", -1)] * (max_len - len(ingr_ids))
-            else:
-                padded_ingr_ids = ingr_ids
-            batch_ingr_ids.append(padded_ingr_ids[:max_len])  # Ensures the list is not longer than max_len
-
-        return batch_ingr_ids
-
-    def compute_metrics(self, pred, tokenized_pred=False, verbose=True):
-        labels = pred.label_ids # text_output ids
-        target_ingr = []
-        for label in labels:
-            ingrs = self.label_ids2ingr_class[tuple(label)]
-            target_ingr.append(ingrs)
-        
-        target_ingr = torch.tensor(target_ingr) # one-hot already
-        target_ingr = to_one_hot(target_ingr)
-
-        if tokenized_pred:
-            pred_ingr = self.map_to_classes(pred.predictions)
-        else:
-            pred_ingr = self.map_to_classes(pred.predictions[0].argmax(-1))
-        pred_ingr = to_one_hot(torch.tensor(pred_ingr))
-        
-        f1_micro = f1_score(target_ingr, pred_ingr, average='micro')
-        f1_macro = f1_score(target_ingr, pred_ingr, average='macro')
-        iou_micro = jaccard_score(target_ingr, pred_ingr, average='micro')
-        iou_macro = jaccard_score(target_ingr, pred_ingr, average='macro')
-        # acc = accuracy_score(target_ingr, pred_ingr)
-
-        result = {
-            'f1_micro': f1_micro,
-            'f1_macro': f1_macro,
-            # 'accuracy': acc,
-            'iou_macro': iou_macro,
-            'iou_micro': iou_micro,
-        }
-
-        if verbose:
-            logging.info(f'* Evaluation result: {result}')
-
-        return result
-
-class MyTrainer(Trainer):
-    def __init__(
-        self,
-        model= None,
-        args= None,
-        data_collator= None,
-        train_dataset= None,
-        eval_dataset= None,
-        tokenizer= None,
-        model_init= None,
-        compute_metrics = None,
-        callbacks= None,
-        optimizers= (None, None),
-        preprocess_logits_for_metrics = None,
-        metric_class=None,
-    ):
-        super().__init__(
-            model=model,
-            args=args,
-            data_collator=data_collator,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
-            model_init=model_init,
-            compute_metrics=compute_metrics,
-            callbacks=callbacks,
-            optimizers=optimizers,
-            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        )
-
-        self.metric_class = metric_class
-        
-    
-    # TODO optimize for multiprocess
-    def evaluate(
-        self,
-        eval_dataset = None,
-        ignore_keys= None,
-        metric_key_prefix: str = "eval",
-    ) -> Dict[str, float]:
-        
-        with torch.no_grad():
-            metrics = super().evaluate(
-                eval_dataset=eval_dataset,
-                ignore_keys=ignore_keys,
-                metric_key_prefix=metric_key_prefix
-                )
-            
-            self.model.eval()
-
-            f1s = []
-            ious = []
-
-            for start_idx in range(0, len(self.eval_dataset), self._train_batch_size):
-                end_idx = min(len(self.eval_dataset), start_idx + self._train_batch_size)
-                
-                batch = {
-                    'pixel_values': torch.tensor(self.eval_dataset['pixel_values'][start_idx:end_idx]).to(self.model.device),
-                    'input_ids': torch.tensor(self.eval_dataset['input_ids'][start_idx:end_idx]).to(self.model.device),
-                    'attention_mask': torch.tensor(self.eval_dataset['attention_mask'][start_idx:end_idx]).to(self.model.device),
-                    'qformer_input_ids': torch.tensor(self.eval_dataset['qformer_input_ids'][start_idx:end_idx]).to(self.model.device),
-                    'qformer_attention_mask': torch.tensor(self.eval_dataset['qformer_attention_mask'][start_idx:end_idx]).to(self.model.device),
-                }
-                
-                outputs = self.model.generate(
-                        **batch,
-                        do_sample = False,
-                        num_beams=5,
-                        max_length=128,
-                        min_length=1,
-                        repetition_penalty=1.5,
-                        length_penalty=1.0,
-                        temperature=1,
-                    )
-                
-                gen_metrics = self.metric_class.compute_metrics(
-                    EvalPrediction(predictions=outputs.cpu(), label_ids=self.eval_dataset['label_ids'][start_idx:end_idx]),
-                    tokenized_pred = True,
-                    verbose = True,
-                )
-                f1s.append(gen_metrics['f1_micro'])
-                ious.append(gen_metrics['iou_micro'])
-
-                if random.random() < 0.3:
-                    rand_idx = random.randint(0, len(outputs)-1)
-                    gen_text = self.metric_class.tokenizer.decode(outputs[rand_idx].cpu())
-                    logging.info(f'- Generation example: ,{gen_text}')
-
-                del batch, outputs
-        
-        torch.cuda.empty_cache()
-        
-        gen_metrics = {
-            'gen_f1': sum(f1s) / len(f1s),
-            'gen_iou': sum(ious) / len(ious)
-        }
-        metrics.update(gen_metrics)
-        
-        logging.info('==================================')
-        logging.info(f'* Evaluation result: {metrics}')
-        
-        return metrics
-
-
 def train(args):
-    model = FreezeInstructBlipForConditionalGeneration.from_pretrained(args.model_name)
+    """
+    Training script for original InstructBlip with T5-xl
+    """
+
     processor = InstructBlipProcessor.from_pretrained(args.model_name)
+
+    possible_cache_dir = os.path.join(args.dataset_cache_path, args.dataset_name)
+
+    if args.dataset_name == 'recipe1m':
+        if os.path.exists(possible_cache_dir):
+            logger.info(f"Load {args.dataset_name} from cache")
+            datasets = DatasetDict.load_from_disk(possible_cache_dir)
+            datasets = remove_unused_columns(datasets, args.generate_mode)
+        else:
+            logger.info("* Recipe1M mapping start")
+            datasets = load_datasets( 
+                processor=processor, 
+                data_dir=args.dataset_path, 
+                training_samples=args.training_samples,
+                eval_samples=args.eval_samples, 
+                pre_map=args.pre_map,
+                decoder_only=args.decoder_only
+            )
+            datasets = DatasetDict(datasets)
+            logger.info("* Recipe1M saving start")
+            os.makedirs(possible_cache_dir)
+            datasets.save_to_disk(possible_cache_dir)
+            logger.info(f"* Save dataset to {possible_cache_dir}") 
+        
+        num_labels = len(datasets['train'][0]['labels']) ## TODO -2 # 0: <end>, 1487: <pad>
+            
+    else:
+        if os.path.exists(possible_cache_dir):
+            logger.info(f"Load {args.dataset_name} from cache")
+            datasets = DatasetDict.load_from_disk(possible_cache_dir)
+            # TODO make class_names compatible to other datasets (coarse label, fine label..)
+            class_names = datasets['train'].features['coarse_label'].names if not args.fine_label else datasets['train'].features['fine_label'].names
+            num_labels = len(class_names)
+        else:
+            datasets = load_dataset(args.dataset_name)
+            # TODO make class_names compatible to other datasets (coarse label, fine label..)
+            class_names = datasets['train'].features['coarse_label'].names if not args.fine_label else datasets['train'].features['fine_label'].names
+            num_labels = len(class_names)
+            class_names = ", ".join(class_names).replace('_', ' ')
+
+            def preprocess_data(examples):
+                text_input = [f'Identify the main object in the image from the following categories: {class_names}']*len(examples['img'])
+                inputs = processor(
+                    images = examples['img'],
+                    text = text_input,
+                    return_tensors='pt',
+                ) # input_ids, attention_mask, qformer_iput_ids, qformer_attention_mask, pixel_values
+
+                inputs['labels'] = to_one_hot(examples['coarse_label'] if not args.fine_label else examples['fine_label'], num_classes = num_labels, remove_pad=False) # one-hot labels
+                
+                return inputs
+            
+            if len(datasets) == 2: # no eval split
+                eval_split_ratio = args.eval_split_ratio # 0.1
+                train_test_split = datasets["train"].train_test_split(test_size=eval_split_ratio)
+                datasets = DatasetDict({
+                    'train': train_test_split['train'],
+                    'val': train_test_split['test'],  # new validation set
+                    'test': datasets['test']
+                })
+            
+            assert len(datasets) == 3
+            datasets = datasets.map(preprocess_data, batched=True)
+            
+            os.makedirs(possible_cache_dir)
+            datasets.save_to_disk(possible_cache_dir)
+            logger.info(f"* Save dataset to {possible_cache_dir}") 
+
     processor.save_pretrained(os.path.join(args.output_dir, 'best'))
 
-    datasets = load_datasets( 
-        processor=processor, 
-        data_dir=args.dataset_path, 
-        training_samples=args.training_samples,
-        eval_samples=args.eval_samples, 
-        pre_map=args.pre_map,
-        decoder_only=args.decoder_only
-    )
+    model = FreezeInstructBlipForConditionalGeneration.from_pretrained(args.model_name)
     
     training_args = TrainingArguments(
         per_device_train_batch_size=args.batch_size,
@@ -273,26 +163,25 @@ def train(args):
         save_steps=args.eval_steps,
         save_total_limit=4,
         load_best_model_at_end=True,
-        # metric_for_best_model='loss',
+        metric_for_best_model='f1_micro', # TODO f1_macro? mAP? AP?
+        greater_is_better=True,
         dataloader_num_workers=4,
         ddp_find_unused_parameters=False,
         save_safetensors=False,
         # include_inputs_for_metrics=True,
-        # remove_unused_columns= False ## TODO
+        remove_unused_columns= False ## TODO
     )
 
-    eval_metrics = DecoderEvalMetrics(processor.tokenizer, datasets['val'])
+    eval_metrics = Recipe1mEvalMetrics(processor.tokenizer)
     
-    # TODO: compute_metrics
-    trainer = MyTrainer( 
+    trainer = CustomTrainer( 
         model=model,
         args=training_args,
         train_dataset=datasets['train'],
         eval_dataset=datasets['val'],
-        # data_collator = CustomDataCollator(tokenizer=processor.tokenizer, model=model)
+        tokenizer=processor.tokenizer,
         compute_metrics=eval_metrics.compute_metrics,
-        # data_collator=data_collator
-        metric_class = eval_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)],
     )
 
     # Train the model
@@ -303,26 +192,25 @@ def train(args):
     # print(eval_result)
 
     # Save
-    # processor.save_pretrained(os.path.join(args.output_dir, 'best'))
     model.save_pretrained_final(os.path.join(args.output_dir, 'best'))
 
     print("* Test start *")
-    # test_results = trainer.evaluate(datasets['test'])
-    # print(test_results)
-
+    test_results = trainer.evaluate(datasets['test'])
+    print(test_results)
 
 if __name__ == '__main__':
     args = parse_args()
-    setup_logger(args)
 
     ###
     # args.batch_size = 20
     # args.training_samples = 100
-    args.eval_samples = 100
-    # args.eval_steps = 10
+    # args.eval_samples = 100
+    # args.eval_steps = 5
+    args.project_name = 'original_instructBlip_t5_recipe1m'
     # args.logging_steps = 50
     ###
 
+    setup_logger(args)
     pretty_print(args)
 
     train(args)

@@ -1,9 +1,16 @@
-import logging
+# import logging
+from transformers.utils import logging
+import pickle
+import random
 
 import torch
 from sklearn.metrics import f1_score, accuracy_score, jaccard_score, precision_score, recall_score
 import numpy as np
 import matplotlib.pyplot as plt
+
+from data.utils import Vocabulary, to_one_hot
+
+logger = logging.get_logger(__name__)
 
 def compute_metrics_f1(pred):
     labels = pred.label_ids
@@ -28,7 +35,7 @@ def compute_metrics_f1(pred):
         'iou_micro': iou_micro,
     }
 
-    logging.info(f'* Evaluation result: {result}')
+    logger.info(f'* Evaluation result: {result}')
 
     return result
 
@@ -51,7 +58,6 @@ def plot_f1(precisions, recalls, max_f1, max_f1_thre, max_idx, file_name='f1_thr
     plt.savefig(file_name)
     print("F1 plot saved at ", file_name)
     plt.show()
-
 
 def compute_metrics_thre(pred): # TODO enable file name pass
     thresholds = np.arange(0.0, 1.05, 0.05).tolist()
@@ -117,6 +123,59 @@ def compute_metrics_acc(pred):
     preds_one_hot = np.eye(20)[preds]
     acc = accuracy_score(labels, preds_one_hot)
     
-    logging.info(f'* Evaluation Accuray: {acc}')
+    logger.info(f'* Evaluation Accuray: {acc}')
 
     return {'accuracy': acc} # TODO
+
+class Recipe1mEvalMetrics():
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.ingr2id = pickle.load(open('/nfs_share2/shared/from_donghee/recipe1m_data/recipe1m_vocab_ingrs.pkl', 'rb')).word2idx
+
+    def map_to_classes(self, batch_tokens, max_len=20, show_gen_examples=False):
+        ingredient_text = self.tokenizer.batch_decode(batch_tokens, skip_special_tokens=True)
+        
+        # Process all ingredients in a batch together
+        batch_ingr_ids = []
+        for ingrs in ingredient_text:
+            ingr_text = [ingr.strip().replace(' ', '_') for ingr in ingrs.split(',')]
+            ingr_ids = [self.ingr2id.get(ingr, None) for ingr in ingr_text if ingr in self.ingr2id]
+            # batch_ingr_ids.append(ingr_ids)
+
+            # Pad the list to ensure consistent length
+            if max_len > len(ingr_ids):
+                padded_ingr_ids = ingr_ids + [self.ingr2id.get("<pad>", -1)] * (max_len - len(ingr_ids))
+            else:
+                padded_ingr_ids = ingr_ids
+            
+            if show_gen_examples and random.random() < 0.02:
+                logger.info(f"* Generation example: {ingrs}")
+            
+            batch_ingr_ids.append(padded_ingr_ids[:max_len])  # Ensures the list is not longer than max_len
+
+        return batch_ingr_ids
+
+    def compute_metrics(self, generation_ids, ingredient_ids_one_hot, show_gen_examples=False, verbose=True): 
+        
+        target_ingr = ingredient_ids_one_hot
+
+        pred_ingr = self.map_to_classes(generation_ids)    
+        pred_ingr = to_one_hot(torch.tensor(pred_ingr))
+        
+        f1_micro = f1_score(target_ingr, pred_ingr, average='micro')
+        f1_macro = f1_score(target_ingr, pred_ingr, average='macro')
+        iou_micro = jaccard_score(target_ingr, pred_ingr, average='micro')
+        iou_macro = jaccard_score(target_ingr, pred_ingr, average='macro')
+
+        result = {
+            'f1_micro': f1_micro,
+            'f1_macro': f1_macro,
+            'iou_macro': iou_macro,
+            'iou_micro': iou_micro,
+        }
+
+        if verbose:
+            logger.info(f'* Evaluation result: {result}')
+
+        return result

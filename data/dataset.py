@@ -9,7 +9,8 @@ import random
 import json
 import lmdb
 import nltk
-import logging
+# import logger
+from transformers.utils import logging
 from typing import Dict
 
 import numpy as np
@@ -29,6 +30,7 @@ from transformers import DataCollatorWithPadding
 from data.utils import Vocabulary, to_one_hot
 
 # TODO better way
+logger = logging.get_logger(__name__)
 
 class Recipe1MDataset(Dataset):
     """
@@ -103,7 +105,7 @@ class Recipe1MDataset(Dataset):
             # print ("Image recipe_id not found in lmdb. Loading jpeg file...")
             # image = Image.open(os.path.join(self.root, path[0], path[1],
             #                                 path[2], path[3], path)).convert('RGB')
-            logging.info("Not able to load lmdb file")
+            logger.info("Not able to load lmdb file")
             pixel_values = None
 
         # idx = index
@@ -250,10 +252,10 @@ def load_image_datasets(
     max_num_labels=20,
 ):
     if not pre_map:
-        logging.info('batches of data are processed on-the-fly')
+        logger.info('batches of data are processed on-the-fly')
 
     if training_samples != -1:
-        logging.info(f"Limiting the number of training samples to {training_samples}")
+        logger.info(f"Limiting the number of training samples to {training_samples}")
     
     def process_data(example):
         sample = dict()
@@ -312,16 +314,16 @@ def llava_load_datasets(
     ) -> Dict[str, hf_Dataset]:
 
     if not pre_map:
-        logging.info('batches of data are processed on-the-fly')
+        logger.info('batches of data are processed on-the-fly')
 
     if training_samples != -1:
-        logging.info(f"Limiting the number of training samples to {training_samples}")
+        logger.info(f"Limiting the number of training samples to {training_samples}")
     
     if not pre_map:
-        logging.info('batches of data are processed on-the-fly')
+        logger.info('batches of data are processed on-the-fly')
 
     if training_samples != -1:
-        logging.info(f"Limiting the number of training samples to {training_samples}")
+        logger.info(f"Limiting the number of training samples to {training_samples}")
     
     def process_data(example):
         if decoder_only:
@@ -376,7 +378,7 @@ def load_datasets(
         data_dir, 
         training_samples=-1, 
         eval_samples=1500,
-        test_samples=1500, 
+        test_samples=-1, 
         max_num_labels=20, 
         pre_map=False, 
         decoder_only=False, 
@@ -393,10 +395,10 @@ def load_datasets(
     Limits the number of validation and test samples to 1500
     '''
     if not pre_map:
-        logging.info('batches of data are processed on-the-fly')
+        logger.info('batches of data are processed on-the-fly')
 
     if training_samples != -1:
-        logging.info(f"Limiting the number of training samples to {training_samples}")
+        logger.info(f"Limiting the number of training samples to {training_samples}")
     
     def process_data(example):
         # processor.tokenizer.padding_side = 'right'
@@ -529,7 +531,7 @@ def load_datasets_for_distributed(processor, data_dir, rank, world_size, trainin
 
         # Slice the dataset for the current process
         datasets[split] = dataset.select(range(start, end))
-        logging.info(f"* Size of {split} dataset for each processor: {len(datasets[split])}")
+        logger.info(f"* Size of {split} dataset for each processor: {len(datasets[split])}")
 
     return datasets
 
